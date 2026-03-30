@@ -6,11 +6,13 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 
 | Tool | Purpose |
 |------|---------|
-| Python 3.8+ | `create_mbr.py`, `decode_mbr.py` |
+| Python 3.8+ | `create_mbr.py`, `decode_mbr.py`, `decode_j2735.py` |
 | `cryptography` (pip) | ECDSA signing, AES-CCM encryption |
 | `requests` (pip) | IP geolocation for default lat/lon |
+| `pycrate` (pip) | J2735 UPER decoding (`decode_j2735.py`) |
 | `gcc` | Compile `lib/libdecode.so` |
-| `lib/libdecode.so` | Required at runtime by both scripts |
+| `lib/libdecode.so` | Required at runtime by `create_mbr.py` and `decode_mbr.py` |
+| `J2735ASN_202409/` | J2735 ASN.1 schema files (required by `decode_j2735.py`) |
 
 Install Python dependencies:
 
@@ -59,7 +61,23 @@ python3 create_mbr.py \
     --out-dir coer/
 ```
 
-### Decode — `decode_mbr.py`
+### Decode J2735 BSM — `decode_j2735.py`
+
+Decodes a J2735 `MessageFrame` from a UPER hex string (e.g. the `unsecuredData` field in `decode_mbr.py` output) to JSON on stdout.
+
+```bash
+python3 decode_j2735.py <hex>
+```
+
+**Example** (hex copied from `decode_mbr.py` output):
+
+```bash
+python3 decode_j2735.py 001480A35FE73C47D19362A716192D96743CCBAB4D038388...
+```
+
+Note: J2735 schema compilation runs on every invocation and takes a few seconds.
+
+### Decode MBR — `decode_mbr.py`
 
 Decodes a COER file to JSON on stdout, recursively expanding all open-type (`ANY`) fields.
 
@@ -166,6 +184,7 @@ ASN1/
 ├── coer/                   Sample COER files and decoded JSON outputs
 ├── create_mbr.py           MBR encoder
 ├── decode_mbr.py           MBR decoder
+├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
 ├── build_asn_lib.sh        Compile c_code/ → lib/libdecode.so
 ├── compile_asn1.sh         Run asn1c on J3287_ASN_flat/ → c_code/
