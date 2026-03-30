@@ -35,6 +35,8 @@ import secrets
 import struct
 import sys
 
+from decode_mbr import decode_oer
+
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -69,11 +71,16 @@ def enc_octet_string_var(data: bytes) -> bytes:
     return enc_length(len(data)) + data
 
 def enc_integer_var(v: int) -> bytes:
-    """OER unconstrained non-negative INTEGER: length + big-endian bytes."""
+    """OER unconstrained non-negative INTEGER: length + two's-complement big-endian.
+    A leading zero byte is added when the high bit of the value would be set,
+    to prevent misinterpretation as a negative two's-complement value.
+    """
     if v == 0:
         return b'\x01\x00'
     n = (v.bit_length() + 7) // 8
     raw = v.to_bytes(n, 'big')
+    if raw[0] & 0x80:
+        raw = b'\x00' + raw
     return enc_length(len(raw)) + raw
 
 def enc_quantity(count: int) -> bytes:
@@ -460,12 +467,6 @@ def write_file(path: str, data: bytes) -> None:
 
 # ── MBR building (SaeJ3287Mbr from input BSM) ─────────────────────────────────
 
-def enc_time64(t: int) -> bytes:
-    """Time64 = Uint64: 8-byte unsigned big-endian (TAI µs since 2004-01-01)."""
-    return enc_uint64(t)
-
-
-
 def enc_three_d_location(lat: int, lon: int, elev: int) -> bytes:
     """ThreeDLocation OER encoding.
 
@@ -537,20 +538,23 @@ def enc_sae_j3287_mbr(gen_time: int, lat: int, lon: int, elev: int,
     report_bytes: encoded AidSpecificReport.
     """
     return (
-        enc_time64(gen_time)
+        enc_uint64(gen_time)                       # Time64: 8-byte unsigned big-endian
         + enc_three_d_location(lat, lon, elev)
         + report_bytes
     )
 
 
-def _extract_bsm_gen_time(bsm_json: dict):
+def _extract_bsm_gen_time(bsm_json: dict) -> int:
     """Extract generationTime from a decoded Ieee1609Dot2Data JER dict."""
-    return (bsm_json
-            .get("content", {})
-            .get("signedData", {})
-            .get("tbsData", {})
-            .get("headerInfo", {})
-            .get("generationTime"))
+    t = (bsm_json
+         .get("content", {})
+         .get("signedData", {})
+         .get("tbsData", {})
+         .get("headerInfo", {})
+         .get("generationTime"))
+    if t is None:
+        raise ValueError("BSM headerInfo does not contain generationTime")
+    return t
 
 
 def build_mbr_from_bsm(bsm_bytes: bytes,
@@ -560,7 +564,6 @@ def build_mbr_from_bsm(bsm_bytes: bytes,
     Hard-codes a LongAcc-ValueTooLarge observation (tgtId=5, obsId=4, obs=NULL).
     Extracts generationTime from the BSM headerInfo.
     """
-    from decode_mbr import decode_oer
     bsm_json = decode_oer("Ieee1609Dot2Data", bsm_bytes)
     gen_time = _extract_bsm_gen_time(bsm_json)
 
