@@ -465,12 +465,6 @@ def enc_time64(t: int) -> bytes:
     return enc_uint64(t)
 
 
-def tai64_now() -> int:
-    """Current time as Time64: TAI microseconds since 2004-01-01 00:00:00 UTC."""
-    epoch = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
-    utc_now = datetime.datetime.now(tz=datetime.timezone.utc)
-    return int((utc_now - epoch).total_seconds() * 1_000_000) + 37 * 1_000_000
-
 
 def enc_three_d_location(lat: int, lon: int, elev: int) -> bytes:
     """ThreeDLocation OER encoding.
@@ -549,49 +543,26 @@ def enc_sae_j3287_mbr(gen_time: int, lat: int, lon: int, elev: int,
     )
 
 
-def _extract_bsm_time_location(bsm_json: dict):
-    """Extract (gen_time, lat, lon, elev) from a decoded Ieee1609Dot2Data JER dict.
-    Returns (None, None, None, None) if fields are absent or the path doesn't exist.
-    """
-    try:
-        hi = (bsm_json
-              .get("content", {})
-              .get("signedData", {})
-              .get("tbsData", {})
-              .get("headerInfo", {}))
-        gen_time = hi.get("generationTime")
-        loc  = hi.get("generationLocation") or {}
-        lat  = loc.get("latitude")
-        lon  = loc.get("longitude")
-        elev = loc.get("elevation")
-        return gen_time, lat, lon, elev
-    except Exception:
-        return None, None, None, None
+def _extract_bsm_gen_time(bsm_json: dict):
+    """Extract generationTime from a decoded Ieee1609Dot2Data JER dict."""
+    return (bsm_json
+            .get("content", {})
+            .get("signedData", {})
+            .get("tbsData", {})
+            .get("headerInfo", {})
+            .get("generationTime"))
 
 
-def build_mbr_from_bsm(bsm_bytes: bytes) -> bytes:
+def build_mbr_from_bsm(bsm_bytes: bytes,
+                        lat: int = 0, lon: int = 0, elev: int = 0) -> bytes:
     """Build a SaeJ3287Mbr (EtsiTs103759Mbr) from an Ieee1609Dot2Data BSM.
 
     Hard-codes a LongAcc-ValueTooLarge observation (tgtId=5, obsId=4, obs=NULL).
-    Extracts generationTime / generationLocation from the BSM headerInfo;
-    falls back to current TAI time and zero coordinates if unavailable.
+    Extracts generationTime from the BSM headerInfo.
     """
-    gen_time = lat = lon = elev = None
-    try:
-        from decode_mbr import decode_oer   # lazy import; needs lib/libdecode.so
-        bsm_json = decode_oer("Ieee1609Dot2Data", bsm_bytes)
-        gen_time, lat, lon, elev = _extract_bsm_time_location(bsm_json)
-    except Exception as exc:
-        print(f"  (BSM decode for time/location failed: {exc}; using defaults)",
-              file=sys.stderr)
-
-    if gen_time is None:
-        gen_time = tai64_now()
-        print(f"  (generationTime fallback: current TAI µs = {gen_time})",
-              file=sys.stderr)
-    if lat  is None: lat  = 0
-    if lon  is None: lon  = 0
-    if elev is None: elev = 0
+    from decode_mbr import decode_oer
+    bsm_json = decode_oer("Ieee1609Dot2Data", bsm_bytes)
+    gen_time = _extract_bsm_gen_time(bsm_json)
 
     # LongAcc-ValueTooLarge: obsId=4, obs=NULL (empty open type)
     obs = enc_mb_single_obs_long_acc(4)
@@ -632,6 +603,12 @@ def main():
                    help="PSID for headerInfo (default: 38 = MBR)")
     p.add_argument("--cert-days", type=int, default=7,
                    help="Certificate validity in days (default: 7)")
+    p.add_argument("--lat",  type=int, default=0,
+                   help="observationLocation latitude (default: 0)")
+    p.add_argument("--lon",  type=int, default=0,
+                   help="observationLocation longitude (default: 0)")
+    p.add_argument("--elev", type=int, default=0,
+                   help="observationLocation elevation (default: 0)")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -642,7 +619,7 @@ def main():
         bsm_bytes = f.read()
 
     print("Building MBR from BSM...", file=sys.stderr)
-    mbr_bytes = build_mbr_from_bsm(bsm_bytes)
+    mbr_bytes = build_mbr_from_bsm(bsm_bytes, lat=args.lat, lon=args.lon, elev=args.elev)
     print("Writing:", file=sys.stderr)
 
     # Plaintext: SaeJ3287MbrSec.plaintext = SaeJ3287Mbr (raw MBR bytes)
