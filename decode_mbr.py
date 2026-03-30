@@ -9,6 +9,7 @@ Outputs a JSON object to stdout with recursively decoded fields.
 Requires: lib/libdecode.so  (run ./build_asn_lib.sh once to build it)
 """
 
+import argparse
 import sys
 import os
 import json
@@ -225,7 +226,6 @@ def enrich_sae_j3287_data(data: dict) -> dict:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(
         description="Recursive OER/COER decoder for SaeJ3287 messages"
     )
@@ -243,6 +243,9 @@ def main():
         raw = f.read()
 
     pdu_type = args.type
+    if not raw:
+        print("ERROR: input file is empty", file=sys.stderr)
+        sys.exit(1)
     if pdu_type == "SaeJ3287Data" and raw[0] != 0x01:
         # SaeJ3287Data starts with version=1 (0x01).
         # A bare SaeJ3287Mbr starts with Time64 (high byte 0x00 for current timestamps).

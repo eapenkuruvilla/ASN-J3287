@@ -97,7 +97,8 @@ def enc_choice(index: int, value: bytes) -> bytes:
     when encoding root alternatives (before '...'). Extension additions would
     need a length wrapper, but none are used here.
     """
-    assert index < 63
+    if index >= 63:
+        raise ValueError(f"CHOICE index {index} out of range for root alternatives (0–62)")
     return bytes([0x80 | index]) + value
 
 def enc_enum(value: int) -> bytes:

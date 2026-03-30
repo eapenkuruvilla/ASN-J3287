@@ -1,5 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/c_code"
 ../../asn1c/asn1c/asn1c -fcompound-names -S ../../asn1c/skeletons ../J3287_ASN_flat/*.asn

@@ -110,7 +110,7 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 │  compile_asn1.sh                                     │
 │    → runs asn1c -fcompound-names on J3287_ASN_flat/  │
 │    → post-processes IOC CLASS alias issues           │
-│    → installs stubs/C-2ENT.{h,c}                    │
+│    → installs stubs/*.{h,c} into c_code/             │
 │         │                                            │
 │  c_code/   (~380 generated .c/.h files)              │
 └──────────────────────────────────────────────────────┘
@@ -154,7 +154,7 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 ASN1/
 ├── J3287_ASN/              Parameterized ASN.1 source schemas
 ├── J3287_ASN_flat/         Flattened schemas (output of translate_asn1.py)
-├── c_code/                 Generated C code + handwritten shim (decode_shim.{h,c})
+├── c_code/                 Generated C code (populated by compile_asn1.sh)
 ├── stubs/                  Handwritten C files copied into c_code/ by compile_asn1.sh:
 │                             C-2ENT.{h,c}      — ANY replacement for IOC CLASS open types
 │                             decode_shim.{h,c} — OER→JER decoder entry point for libdecode.so
@@ -188,4 +188,3 @@ ASN1/
 | `obs` | *(empty)* | NULL payload |
 
 The BSM itself is included as evidence in `v2xPduEvidence` (`type=2`, `c-ObsPdu-ieee1609Dot2Data`).
-
