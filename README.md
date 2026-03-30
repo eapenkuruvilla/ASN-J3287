@@ -84,6 +84,7 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 ┌──────────────────────────────────────────────────────┐
 │  0. BUILD TOOL  (one-time)                           │
 │                                                      │
+│  # Clone one level above this repo                   │
 │  git clone https://github.com/mouse07410/asn1c       │
 │  cd asn1c && autoreconf -iv && ./configure           │
 │  make && sudo make install                           │
@@ -153,7 +154,6 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 ASN1/
 ├── J3287_ASN/              Parameterized ASN.1 source schemas
 ├── J3287_ASN_flat/         Flattened schemas (output of translate_asn1.py)
-├── asn1c/                  ASN.1 compiler with custom OER/JER skeletons
 ├── c_code/                 Generated C code + handwritten shim (decode_shim.{h,c})
 ├── stubs/                  C-2ENT stub (ANY replacement for IOC CLASS open types)
 ├── lib/                    libdecode.so (compiled by build_asn_lib.sh)

@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C_CODE="$SCRIPT_DIR/c_code"
 LIB_DIR="$SCRIPT_DIR/lib"
-SKELETONS="$SCRIPT_DIR/asn1c/skeletons"
+SKELETONS="$SCRIPT_DIR/../asn1c/skeletons"
 PDU_TABLE="$C_CODE/pdu_table.c"
 OUT="$LIB_DIR/libdecode.so"
 
