@@ -82,6 +82,27 @@ The SCMS certificate store under `certs/<HashedId8>/` contains:
 | `trustedcerts/` | Root of trust: `rca`, `pca`, `ica`, `eca`, `ra` |
 | `download/*/` | Pool of downloaded pseudonym certs and their signing keys |
 
+**Certificate structure**
+
+The directory name (`<HashedId8>`) is the last 8 bytes of the SHA-256 hash of the active AT (`certchain/0`), used as its identifier.
+
+Chain of trust (bottom → top):
+
+```
+certchain/s   32-byte raw P-256 private key scalar
+certchain/0   Authorization Ticket (AT / pseudonym cert, ~79–96 bytes)
+                  signed by ↓
+certchain/1   Pseudonym CA (PCA) certificate
+                  signed by ↓
+certchain/2   Intermediate CA (ICA) certificate
+                  signed by ↓
+trustedcerts/rca  Root CA (offline trust anchor)
+```
+
+`certchain/0` and `certchain/s` are the **active** identity used for signing. The `download/` pool holds batches of future pseudonym certs (each batch is a subdirectory named by its hex batch ID, containing 16 cert+key pairs named `<batch>_0.cert` / `<batch>_0.s` through `<batch>_F.cert` / `<batch>_F.s`). Rotating to a new pseudonym means copying a pair from `download/` into `certchain/0` and `certchain/s`. Each cert in the pool is a distinct identity with its own key pair.
+
+`create_mbr.py` uses only `certchain/0` and `certchain/s` directly via `--cert` and `--signing-key`. The `download/` pool is not consumed by any current tool — cert rotation/selection logic has not yet been implemented.
+
 ### Decode J2735 BSM — `decode_j2735.py`
 
 Decodes a J2735 `MessageFrame` from a UPER hex string (e.g. the `unsecuredData` field in `decode_mbr.py` output) to JSON on stdout.
