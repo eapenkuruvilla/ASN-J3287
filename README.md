@@ -35,11 +35,15 @@ Builds a `SaeJ3287Data` COER file from an input BSM. Always produces `out_plaint
 ```bash
 python3 create_mbr.py \
     --bsm <file.coer>               # Input Ieee1609Dot2Data BSM (required)
-    [--signing-key <key.pem>]       # ECDSA P-256 private key — enables out_signed.coer
+    [--signing-key <key>]           # ECDSA P-256 private key — PEM file or raw 32-byte scalar
+                                    #   (e.g. certs/<id>/certchain/s) — enables out_signed.coer
+    [--cert <file>]                 # IEEE 1609.2 Certificate binary to embed as signer
+                                    #   (e.g. certs/<id>/certchain/0); if omitted a self-signed
+                                    #   certificate is generated from --signing-key
     [--recipient-pub <hex>]         # Recipient P-256 public key (64–65 bytes hex) — enables out_ste.coer
     [--out-dir coer/]               # Output directory (default: coer/)
     [--psid 38]                     # PSID for headerInfo (default: 38 = MBR)
-    [--cert-days 7]                 # Certificate validity in days (default: 7)
+    [--cert-days 7]                 # Certificate validity in days (default: 7, ignored when --cert provided)
     [--lat <int>]                   # observationLocation latitude in 1e-7 deg units (default: IP geolocation)
     [--lon <int>]                   # observationLocation longitude in 1e-7 deg units (default: IP geolocation)
     [--elev 0]                      # observationLocation elevation (default: 0)
@@ -53,13 +57,34 @@ python3 create_mbr.py \
 | `out_signed.coer` | `SaeJ3287MbrSec.signed` | `--signing-key` |
 | `out_ste.coer` | `SaeJ3287MbrSec.sTE` | `--signing-key` + `--recipient-pub` |
 
-**Example:**
+**Example — plaintext only:**
 
 ```bash
 python3 create_mbr.py \
     --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
     --out-dir coer/
 ```
+
+**Example — signed with SCMS pseudonym certificate:**
+
+```bash
+python3 create_mbr.py \
+    --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
+    --signing-key certs/9b09e9e5e5c99a9e/certchain/s \
+    --cert       certs/9b09e9e5e5c99a9e/certchain/0 \
+    --out-dir coer/
+```
+
+The SCMS certificate store under `certs/<HashedId8>/` contains:
+
+| Path | Content |
+|------|---------|
+| `certchain/0` | Active Authorization Ticket (AT / pseudonym cert) |
+| `certchain/s` | Raw P-256 signing key scalar for `certchain/0` |
+| `certchain/1` | Pseudonym CA (PCA) certificate |
+| `certchain/2` | Intermediate CA (ICA) certificate |
+| `trustedcerts/` | Root of trust: `rca`, `pca`, `ica`, `eca`, `ra` |
+| `download/*/` | Pool of downloaded pseudonym certs and their signing keys |
 
 ### Decode J2735 BSM — `decode_j2735.py`
 
@@ -184,6 +209,11 @@ ASN1/
 │                             C-2ENT.{h,c}      — ANY replacement for IOC CLASS open types
 │                             decode_shim.{h,c} — OER→JER decoder entry point for libdecode.so
 ├── lib/                    libdecode.so (compiled by build_asn_lib.sh)
+├── certs/                  SCMS certificate store
+│   └── <HashedId8>/        One directory per device identity
+│       ├── certchain/      Active cert chain: 0=AT, 1=PCA, 2=ICA, s=signing key
+│       ├── trustedcerts/   Root of trust certificates (rca, pca, ica, eca, ra)
+│       └── download/       Pool of downloaded pseudonym certs and signing keys
 ├── coer/                   Sample COER files and decoded JSON outputs
 ├── create_mbr.py           MBR encoder
 ├── decode_mbr.py           MBR decoder

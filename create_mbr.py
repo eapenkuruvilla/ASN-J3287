@@ -20,7 +20,11 @@ Produces:
     {out_dir}/out_ste.coer         -- SaeJ3287MbrSec.sTE    (if both keys)
 
 Keys:
-    --signing-key   ECDSA P-256 private key in PEM format (optional)
+    --signing-key   ECDSA P-256 private key — PEM file, or raw 32-byte scalar
+                    (e.g. certs/<id>/certchain/s)  (optional)
+    --cert          IEEE 1609.2 Certificate binary file to use as signer identity
+                    (e.g. certs/<id>/certchain/0).  If omitted a self-signed
+                    certificate is generated from the signing key.
     --recipient-pub Recipient P-256 public key, hex-encoded, uncompressed
                     (65 bytes: 04 || x || y, or 64 bytes without the 04 prefix)
                     (optional)
@@ -231,7 +235,13 @@ def enc_to_be_signed_cert(pubkey, start: int, hours: int,
 
 def _sign_digest(signing_key, digest32: bytes) -> tuple:
     """ECDSA P-256 sign a pre-computed 32-byte digest. Returns (r, s)."""
-    sig_der = signing_key.sign(digest32, ec.ECDSA(Prehashed()))
+    try:
+        # cryptography >= 40: Prehashed requires the hash algorithm
+        prehashed = Prehashed(hashes.SHA256())
+    except TypeError:
+        # older cryptography: Prehashed() takes no arguments
+        prehashed = Prehashed()
+    sig_der = signing_key.sign(digest32, ec.ECDSA(prehashed))
     return decode_dss_signature(sig_der)
 
 
@@ -477,9 +487,18 @@ def geolocate_ip() -> tuple:
 
 
 def load_signing_key(path: str):
+    """Load a P-256 signing key from a PEM file or a raw 32-byte scalar file.
+
+    Raw format: exactly 32 bytes, big-endian integer (e.g. certchain/s from
+    an SCMS certificate store).  Any other size is treated as PEM.
+    """
     with open(path, 'rb') as f:
-        return serialization.load_pem_private_key(f.read(), password=None,
-                                                   backend=default_backend())
+        data = f.read()
+    if len(data) == 32:
+        scalar = int.from_bytes(data, 'big')
+        return ec.derive_private_key(scalar, ec.SECP256R1(), default_backend())
+    return serialization.load_pem_private_key(data, password=None,
+                                               backend=default_backend())
 
 
 def load_recipient_pub(hex_str: str) -> bytes:
@@ -625,8 +644,12 @@ def main():
         description="Build SaeJ3287Data COER variants (plaintext / signed / sTE)"
     )
     p.add_argument("--signing-key",
-                   help="ECDSA P-256 private key PEM file "
-                        "(omit to skip signed and sTE variants)")
+                   help="ECDSA P-256 private key — PEM file or raw 32-byte scalar "
+                        "(e.g. certs/<id>/certchain/s); omit to skip signed and sTE variants")
+    p.add_argument("--cert",
+                   help="IEEE 1609.2 Certificate binary file to embed as signer "
+                        "(e.g. certs/<id>/certchain/0); if omitted a self-signed "
+                        "certificate is generated from --signing-key")
     p.add_argument("--recipient-pub",
                    help="Recipient P-256 public key, hex-encoded uncompressed "
                         "(64 or 65 bytes); omit to skip sTE variant")
@@ -677,18 +700,25 @@ def main():
               file=sys.stderr)
         return
 
-    # Build certificate (used for signed and sTE variants)
-    start = tai32_now()
-    cert_bytes = build_certificate(
-        signing_key,
-        start=start,
-        hours=args.cert_days * 24,
-        psids=[32, 38],
-        name="test-signer",
-    )
-    print(f"  Certificate: {len(cert_bytes)} bytes "
-          f"(SHA-256: {hashlib.sha256(cert_bytes).hexdigest()[:16]}...)",
-          file=sys.stderr)
+    # Certificate (used for signed and sTE variants)
+    if args.cert:
+        with open(args.cert, 'rb') as f:
+            cert_bytes = f.read()
+        print(f"  Certificate: {len(cert_bytes)} bytes from {args.cert} "
+              f"(SHA-256: {hashlib.sha256(cert_bytes).hexdigest()[:16]}...)",
+              file=sys.stderr)
+    else:
+        start = tai32_now()
+        cert_bytes = build_certificate(
+            signing_key,
+            start=start,
+            hours=args.cert_days * 24,
+            psids=[32, 38],
+            name="test-signer",
+        )
+        print(f"  Certificate: {len(cert_bytes)} bytes (self-signed) "
+              f"(SHA-256: {hashlib.sha256(cert_bytes).hexdigest()[:16]}...)",
+              file=sys.stderr)
 
     # Signed: SaeJ3287MbrSec.signed = Ieee1609Dot2Data { signedData }
     signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid)

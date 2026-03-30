@@ -207,11 +207,45 @@ def enrich_mbr(mbr: dict) -> dict:
     return {**mbr, "report": report}
 
 
+def _enrich_signed_1609(signed: dict) -> dict:
+    """Decode unsecuredData inside a signed Ieee1609Dot2Data as SaeJ3287Mbr."""
+    try:
+        unsecured_hex = (
+            signed.get("content", {})
+                  .get("signedData", {})
+                  .get("tbsData", {})
+                  .get("payload", {})
+                  .get("data", {})
+                  .get("content", {})
+                  .get("unsecuredData")
+        )
+        if not isinstance(unsecured_hex, str):
+            return signed
+
+        mbr = decode_oer("SaeJ3287Mbr", hex_to_bytes(unsecured_hex))
+        enriched = enrich_mbr(mbr)
+
+        # Rebuild the nested dicts immutably
+        inner   = {**signed["content"]["signedData"]["tbsData"]["payload"]["data"]["content"],
+                   "unsecuredData": enriched}
+        data    = {**signed["content"]["signedData"]["tbsData"]["payload"]["data"],
+                   "content": inner}
+        payload = {**signed["content"]["signedData"]["tbsData"]["payload"], "data": data}
+        tbs     = {**signed["content"]["signedData"]["tbsData"], "payload": payload}
+        sd      = {**signed["content"]["signedData"], "tbsData": tbs}
+        content = {**signed["content"], "signedData": sd}
+        return  {**signed, "content": content}
+    except Exception:
+        return signed
+
+
 def enrich_mbr_sec(mbr_sec: dict) -> dict:
     """Handle one SaeJ3287MbrSec CHOICE element."""
     if "plaintext" in mbr_sec:
         return {"plaintext": enrich_mbr(mbr_sec["plaintext"])}
-    # signed / sTE: pass through as-is (already decoded by libdecode)
+    if "signed" in mbr_sec:
+        return {"signed": _enrich_signed_1609(mbr_sec["signed"])}
+    # sTE: pass through as-is (encrypted)
     return mbr_sec
 
 
