@@ -8,6 +8,7 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 |------|---------|
 | Python 3.8+ | `create_mbr.py`, `decode_mbr.py` |
 | `cryptography` (pip) | ECDSA signing, AES-CCM encryption |
+| `requests` (pip) | IP geolocation for default lat/lon |
 | `gcc` | Compile `lib/libdecode.so` |
 | `lib/libdecode.so` | Required at runtime by both scripts |
 
@@ -37,8 +38,8 @@ python3 create_mbr.py \
     [--out-dir coer/]               # Output directory (default: coer/)
     [--psid 38]                     # PSID for headerInfo (default: 38 = MBR)
     [--cert-days 7]                 # Certificate validity in days (default: 7)
-    [--lat 0]                       # observationLocation latitude (default: 0)
-    [--lon 0]                       # observationLocation longitude (default: 0)
+    [--lat <int>]                   # observationLocation latitude in 1e-7 deg units (default: IP geolocation)
+    [--lon <int>]                   # observationLocation longitude in 1e-7 deg units (default: IP geolocation)
     [--elev 0]                      # observationLocation elevation (default: 0)
 ```
 

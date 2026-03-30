@@ -35,6 +35,11 @@ import secrets
 import struct
 import sys
 
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
+
 from decode_mbr import decode_oer
 
 from cryptography.hazmat.backends import default_backend
@@ -445,6 +450,32 @@ def tai32_now() -> int:
     return int((utc_now - epoch).total_seconds()) + 37   # +37 TAI–UTC leap seconds
 
 
+def geolocate_ip() -> tuple:
+    """Return (lat, lon, elev) based on current public IP via ip-api.com.
+
+    Latitude/longitude are scaled to 1e-7 degree units (IEEE 1609.2 / SAE J2735).
+    Elevation is returned as 0 (ip-api.com does not provide elevation).
+    Falls back to (0, 0, 0) if the request fails or requests is unavailable.
+    """
+    if _requests is None:
+        print("  (requests not installed; using lat=0 lon=0 elev=0)", file=sys.stderr)
+        return 0, 0, 0
+    try:
+        resp = _requests.get("http://ip-api.com/json/", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "success":
+            raise ValueError(data.get("message", "ip-api returned non-success"))
+        lat  = round(data["lat"] * 10_000_000)
+        lon  = round(data["lon"] * 10_000_000)
+        print(f"  (IP geolocation: lat={lat}, lon={lon})", file=sys.stderr)
+        return lat, lon, 0
+    except Exception as exc:
+        print(f"  (IP geolocation failed: {exc}; using lat=0 lon=0 elev=0)",
+              file=sys.stderr)
+        return 0, 0, 0
+
+
 def load_signing_key(path: str):
     with open(path, 'rb') as f:
         return serialization.load_pem_private_key(f.read(), password=None,
@@ -607,10 +638,12 @@ def main():
                    help="PSID for headerInfo (default: 38 = MBR)")
     p.add_argument("--cert-days", type=int, default=7,
                    help="Certificate validity in days (default: 7)")
-    p.add_argument("--lat",  type=int, default=0,
-                   help="observationLocation latitude (default: 0)")
-    p.add_argument("--lon",  type=int, default=0,
-                   help="observationLocation longitude (default: 0)")
+    p.add_argument("--lat",  type=int, default=None,
+                   help="observationLocation latitude in 1e-7 deg units "
+                        "(default: derived from IP geolocation)")
+    p.add_argument("--lon",  type=int, default=None,
+                   help="observationLocation longitude in 1e-7 deg units "
+                        "(default: derived from IP geolocation)")
     p.add_argument("--elev", type=int, default=0,
                    help="observationLocation elevation (default: 0)")
     args = p.parse_args()
@@ -622,8 +655,15 @@ def main():
     with open(args.bsm, 'rb') as f:
         bsm_bytes = f.read()
 
+    if args.lat is None or args.lon is None:
+        geo_lat, geo_lon, _ = geolocate_ip()
+        lat  = args.lat  if args.lat  is not None else geo_lat
+        lon  = args.lon  if args.lon  is not None else geo_lon
+    else:
+        lat, lon = args.lat, args.lon
+
     print("Building MBR from BSM...", file=sys.stderr)
-    mbr_bytes = build_mbr_from_bsm(bsm_bytes, lat=args.lat, lon=args.lon, elev=args.elev)
+    mbr_bytes = build_mbr_from_bsm(bsm_bytes, lat=lat, lon=lon, elev=args.elev)
     print("Writing:", file=sys.stderr)
 
     # Plaintext: SaeJ3287MbrSec.plaintext = SaeJ3287Mbr (raw MBR bytes)
