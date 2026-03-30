@@ -20,11 +20,7 @@ Install Python dependencies:
 pip install -r requirements.txt
 ```
 
-Build the shared library once before using either script:
-
-```bash
-./build_asn_lib.sh
-```
+See the [Process Flow](#process-flow) section for one-time setup steps (building `asn1c` and compiling `lib/libdecode.so`).
 
 ## Usage
 
@@ -115,10 +111,20 @@ python3 decode_mbr.py <file.coer> [--type {SaeJ3287Data|SaeJ3287Mbr}]
 | `file` | — | Input `.coer` file (required) |
 | `--type` | `SaeJ3287Data` | Use `SaeJ3287Mbr` for raw MBR files without the version wrapper; auto-detected if first byte ≠ `0x01` |
 
+**Recursive decoding** — the following fields are decoded automatically at all nesting levels:
+
+| Field | Decoded as |
+|-------|-----------|
+| `AidSpecificReport.content` | `AsrBsm` |
+| `AsrBsm.observations[].observations[]` | `MbSingleObservation-BsmLongAcc` / `MbSingleObservation-BsmSecurity` |
+| `V2xPduStream.v2xPdus[]` | `Ieee1609Dot2Data` (when `type=2`) |
+| `SaeJ3287MbrSec.signed` → `unsecuredData` | `SaeJ3287Mbr` (recursive) |
+
 **Examples:**
 
 ```bash
 python3 decode_mbr.py coer/out_plaintext.coer
+python3 decode_mbr.py coer/out_signed.coer
 python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 ```
 
