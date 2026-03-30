@@ -170,31 +170,38 @@ def enrich_v2x_stream(stream: dict) -> dict:
     return {**stream, "v2xPdus": decoded_pdus}
 
 
-def enrich_asr_bsm(content_hex: str) -> dict:
-    """Decode AidSpecificReport.content ANY as AsrBsm, then enrich recursively."""
-    asr = decode_oer("AsrBsm", hex_to_bytes(content_hex))
-
+def _enrich_asr_bsm_dict(asr: dict) -> dict:
+    """Enrich an already-decoded AsrBsm dict (observations ANY → typed dicts)."""
     if "observations" in asr:
-        asr["observations"] = [
+        asr = {**asr, "observations": [
             enrich_obs_by_target(o) for o in asr["observations"]
-        ]
-
+        ]}
     if "v2xPduEvidence" in asr:
-        asr["v2xPduEvidence"] = [
+        asr = {**asr, "v2xPduEvidence": [
             enrich_v2x_stream(s) for s in asr["v2xPduEvidence"]
-        ]
-
+        ]}
     return asr
 
 
+def enrich_asr_bsm(content_hex: str) -> dict:
+    """Decode AidSpecificReport.content hex as AsrBsm, then enrich recursively."""
+    return _enrich_asr_bsm_dict(decode_oer("AsrBsm", hex_to_bytes(content_hex)))
+
+
 def enrich_mbr(mbr: dict) -> dict:
-    """Decode report.content ANY based on the aid field."""
+    """Decode report.content based on the aid field."""
     report  = mbr.get("report", {})
     aid     = report.get("aid")
     content = report.get("content")
 
-    if aid == AID_BSM and isinstance(content, str):
-        report = {**report, "content": enrich_asr_bsm(content)}
+    if aid == AID_BSM:
+        if isinstance(content, str):
+            # Rare path: content still hex-encoded (e.g. bare SaeJ3287Mbr without IOS)
+            report = {**report, "content": enrich_asr_bsm(content)}
+        elif isinstance(content, dict):
+            # Normal path: asn1c already decoded content via OPEN_TYPE dispatch;
+            # inner SEQUENCE OF ANY fields still need enrichment.
+            report = {**report, "content": _enrich_asr_bsm_dict(content)}
 
     return {**mbr, "report": report}
 
