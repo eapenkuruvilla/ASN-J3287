@@ -262,7 +262,7 @@ def main():
         top      = decode_oer("SaeJ3287Data", raw)
         enriched = enrich_sae_j3287_data(top)
 
-    print(json.dumps(enriched, indent=2))
+    print(json.dumps({pdu_type: enriched}, indent=2))
 
 
 if __name__ == "__main__":
