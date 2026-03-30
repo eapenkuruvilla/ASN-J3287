@@ -155,7 +155,9 @@ ASN1/
 ├── J3287_ASN/              Parameterized ASN.1 source schemas
 ├── J3287_ASN_flat/         Flattened schemas (output of translate_asn1.py)
 ├── c_code/                 Generated C code + handwritten shim (decode_shim.{h,c})
-├── stubs/                  C-2ENT stub (ANY replacement for IOC CLASS open types)
+├── stubs/                  Handwritten C files copied into c_code/ by compile_asn1.sh:
+│                             C-2ENT.{h,c}      — ANY replacement for IOC CLASS open types
+│                             decode_shim.{h,c} — OER→JER decoder entry point for libdecode.so
 ├── lib/                    libdecode.so (compiled by build_asn_lib.sh)
 ├── coer/                   Sample COER files and decoded JSON outputs
 ├── create_mbr.py           MBR encoder
