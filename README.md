@@ -12,7 +12,7 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 | `pycrate` (pip) | J2735 UPER decoding (`decode_j2735.py`) |
 | `gcc` | Compile `lib/libdecode.so` |
 | `lib/libdecode.so` | Required at runtime by `create_mbr.py` and `decode_mbr.py` |
-| `J2735ASN_202409/` | J2735 ASN.1 schema files (required by `decode_j2735.py`) |
+| `asn/J2735ASN_202409/` | J2735 ASN.1 schema files (required by `decode_j2735.py`) |
 
 Install Python dependencies:
 
@@ -118,11 +118,11 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 ┌──────────────────────────────────────────────────────┐
 │  1. SCHEMA TRANSLATION (one-time / on schema change) │
 │                                                      │
-│  J3287_ASN/*.asn   (parameterized ASN.1)             │
+│  asn/J3287_ASN/*.asn   (parameterized ASN.1)         │
 │         │                                            │
 │  translate_asn1.py (idempotent)                      │
 │         │                                            │
-│  J3287_ASN_flat/*.asn  (non-parameterized)           │
+│  asn/J3287_ASN_flat/*.asn  (non-parameterized)       │
 └──────────────────────────────────────────────────────┘
          │
          ▼
@@ -130,7 +130,7 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 │  2. C CODE GENERATION (one-time / on schema change)  │
 │                                                      │
 │  compile_asn1.sh                                     │
-│    → runs asn1c -fcompound-names on J3287_ASN_flat/  │
+│    → runs asn1c -fcompound-names on asn/J3287_ASN_flat/ │
 │    → post-processes IOC CLASS alias issues           │
 │    → installs stubs/*.{h,c} into c_code/             │
 │         │                                            │
@@ -174,8 +174,11 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 
 ```
 ASN1/
-├── J3287_ASN/              Parameterized ASN.1 source schemas
-├── J3287_ASN_flat/         Flattened schemas (output of translate_asn1.py)
+├── asn/                    ASN.1 schema files
+│   ├── J3287_ASN/          Parameterized ASN.1 source schemas
+│   ├── J3287_ASN_flat/     Flattened schemas (output of translate_asn1.py)
+│   ├── J2735ASN_202409/    J2735 schemas (used by decode_j2735.py)
+│   └── ieee1609.2/         IEEE 1609.2 schemas
 ├── c_code/                 Generated C code (populated by compile_asn1.sh)
 ├── stubs/                  Handwritten C files copied into c_code/ by compile_asn1.sh:
 │                             C-2ENT.{h,c}      — ANY replacement for IOC CLASS open types
@@ -187,7 +190,7 @@ ASN1/
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
 ├── build_asn_lib.sh        Compile c_code/ → lib/libdecode.so
-├── compile_asn1.sh         Run asn1c on J3287_ASN_flat/ → c_code/
+├── compile_asn1.sh         Run asn1c on asn/J3287_ASN_flat/ → c_code/
 └── requirements.txt        Python dependencies
 ```
 

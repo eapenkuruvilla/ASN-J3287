@@ -1,7 +1,7 @@
 # ASN.1 Parameterized-to-Flat Translation Guide
 
 This document captures the rules used to convert the parameterized ASN.1 modules in
-`J3287_ASN/` into the non-parameterized (flat) equivalents in `J3287_ASN_flat/`.
+`asn/J3287_ASN/` into the non-parameterized (flat) equivalents in `asn/J3287_ASN_flat/`.
 The flat versions produce **identical OER encodings** to the originals.
 
 ---

@@ -9,7 +9,7 @@ The hex string is the raw UPER-encoded J2735 MessageFrame (e.g. the
 unsecuredData field from decode_mbr.py output).  Spaces are ignored.
 
 Requires: pycrate  (pip install pycrate)
-          J2735ASN_202409/  directory of J2735 ASN.1 schema files
+          asn/J2735ASN_202409/  directory of J2735 ASN.1 schema files
 """
 
 import argparse
@@ -18,7 +18,7 @@ import os
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEMA_DIR = os.path.join(SCRIPT_DIR, "J2735ASN_202409")
+SCHEMA_DIR = os.path.join(SCRIPT_DIR, "asn", "J2735ASN_202409")
 
 
 def load_j2735():

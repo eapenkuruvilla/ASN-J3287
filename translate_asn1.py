@@ -2,8 +2,8 @@
 """
 translate_asn1.py  –  ASN.1 Parameterized → Flat Translation
 
-Reads parameterized ASN.1 source files from J3287_ASN/ and writes
-non-parameterized equivalents to J3287_ASN_flat/.
+Reads parameterized ASN.1 source files from asn/J3287_ASN/ and writes
+non-parameterized equivalents to asn/J3287_ASN_flat/.
 
 The flat versions produce identical OER encodings: every parameterized
 template instantiation is expanded to a concrete type definition, and
@@ -11,7 +11,7 @@ parameterized template definitions are removed from their modules.
 
 Usage
 -----
-    python3 translate_asn1.py [--src J3287_ASN] [--dst J3287_ASN_flat]
+    python3 translate_asn1.py [--src asn/J3287_ASN] [--dst asn/J3287_ASN_flat]
 
 The script is idempotent: re-running it overwrites the destination with a
 fresh translation from the source.
@@ -1088,10 +1088,10 @@ def process_file(src_path: Path, dst_path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Translate parameterized ASN.1 modules to non-parameterized form.')
-    parser.add_argument('--src', default='J3287_ASN',
-                        help='Source directory (default: J3287_ASN)')
-    parser.add_argument('--dst', default='J3287_ASN_flat',
-                        help='Destination directory (default: J3287_ASN_flat)')
+    parser.add_argument('--src', default='asn/J3287_ASN',
+                        help='Source directory (default: asn/J3287_ASN)')
+    parser.add_argument('--dst', default='asn/J3287_ASN_flat',
+                        help='Destination directory (default: asn/J3287_ASN_flat)')
     args = parser.parse_args()
 
     src_dir = Path(args.src)
