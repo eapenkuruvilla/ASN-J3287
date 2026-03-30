@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+decode_mbr.py - Recursive OER/COER decoder for SaeJ3287Data.
+
+Usage: python3 decode_mbr.py <file.coer>
+
+Outputs a JSON object to stdout with recursively decoded fields.
+
+Requires: lib/libdecode.so  (run ./build_asn_lib.sh once to build it)
+"""
+
+import sys
+import os
+import json
+import ctypes
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LIB_PATH   = os.path.join(SCRIPT_DIR, 'lib', 'libdecode.so')
+
+# AID constants (PSID)
+AID_BSM = 32
+
+# BSM tgtId constants
+BSM_TGT_SECURITY = 2
+BSM_TGT_LONGACC  = 5
+
+# IdObsPdu constants
+OBS_PDU_ETSI_GN      = 1
+OBS_PDU_IEEE1609DOT2 = 2
+
+# obsId names for BsmSecurity
+BSM_SECURITY_OBS_NAMES = {
+    1: "MessageIdIncWithHeaderInfo",
+    2: "HeaderIncWithSecurityProfile",
+    3: "HeaderPsidIncWithCertificate",
+    4: "MessageIncWithSsp",
+    5: "HeaderTimeOutsideCertificateValidity",
+    6: "MessageLocationOutsideCertificateValidity",
+    7: "HeaderLocationOutsideCertificateValidity",
+}
+
+# obsId names for BsmLongAcc
+BSM_LONGACC_OBS_NAMES = {
+    4: "ValueTooLarge",
+}
+
+
+# ── libdecode.so ctypes interface ─────────────────────────────────────────────
+
+_lib = None
+
+def _get_lib():
+    global _lib
+    if _lib is not None:
+        return _lib
+    if not os.path.exists(LIB_PATH):
+        print(
+            f"ERROR: {LIB_PATH} not found.\n"
+            "Run ./build_asn_lib.sh to compile the decoder library.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    lib = ctypes.CDLL(LIB_PATH)
+    lib.decode_oer_to_jer.restype  = ctypes.c_int
+    lib.decode_oer_to_jer.argtypes = [
+        ctypes.c_char_p,                    # pdu_name
+        ctypes.c_char_p,                    # data  (binary — length passed separately)
+        ctypes.c_size_t,                    # data_len
+        ctypes.POINTER(ctypes.c_char_p),    # json_out  (malloc'd; free with free_buffer)
+        ctypes.c_char_p,                    # err_buf
+        ctypes.c_size_t,                    # err_size
+    ]
+    lib.free_buffer.restype  = None
+    lib.free_buffer.argtypes = [ctypes.c_void_p]
+    _lib = lib
+    return _lib
+
+
+def decode_oer(pdu_name: str, data: bytes) -> dict:
+    """Decode raw OER/COER bytes as pdu_name, return parsed JER dict."""
+    lib = _get_lib()
+
+    # asn1c uses underscores in C identifiers; hyphens are not valid.
+    c_name  = pdu_name.replace('-', '_').encode()
+    err_buf = ctypes.create_string_buffer(4096)
+    json_out = ctypes.c_char_p(None)
+
+    rc = lib.decode_oer_to_jer(
+        c_name,
+        data, len(data),
+        ctypes.byref(json_out),
+        err_buf, len(err_buf),
+    )
+
+    if rc != 0:
+        # Format a hex dump so the failing bytes are easy to inspect.
+        hex_lines = []
+        for i in range(0, len(data), 16):
+            chunk    = data[i:i+16]
+            hex_part = ' '.join(f'{b:02X}' for b in chunk)
+            asc_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+            hex_lines.append(f"  {i:04X}  {hex_part:<47}  {asc_part}")
+        raise ValueError(
+            f"Decode failed for {pdu_name}: {err_buf.value.decode()}\n"
+            f"Input ({len(data)} bytes):\n" + '\n'.join(hex_lines)
+        )
+
+    try:
+        result = json.loads(json_out.value.decode('utf-8'))
+    finally:
+        lib.free_buffer(json_out)
+
+    return result
+
+
+# ── Enrichment helpers (recursive open-type decoding) ─────────────────────────
+
+def hex_to_bytes(hex_str: str) -> bytes:
+    """Convert JER ANY hex string (uppercase, no spaces) to bytes."""
+    return bytes.fromhex(hex_str.replace(' ', ''))
+
+
+def decode_single_obs(tgt_id: int, hex_val: str) -> dict:
+    """Decode one element from ObservationsByTarget-Bsm.observations (SEQUENCE OF ANY)."""
+    raw = hex_to_bytes(hex_val)
+
+    if tgt_id == BSM_TGT_SECURITY:
+        pdu_name  = "MbSingleObservation-BsmSecurity"
+        obs_names = BSM_SECURITY_OBS_NAMES
+    elif tgt_id == BSM_TGT_LONGACC:
+        pdu_name  = "MbSingleObservation-BsmLongAcc"
+        obs_names = BSM_LONGACC_OBS_NAMES
+    else:
+        return {"_raw": hex_val, "_note": f"unknown tgtId={tgt_id}"}
+
+    decoded = decode_oer(pdu_name, raw)
+    obs_id  = decoded.get("obsId")
+    if obs_id is not None:
+        decoded["obsType"] = obs_names.get(obs_id, f"unknown-obsId-{obs_id}")
+    return decoded
+
+
+def enrich_obs_by_target(obs_by_tgt: dict) -> dict:
+    """Recursively decode the observations SEQUENCE OF ANY."""
+    tgt_id    = obs_by_tgt.get("tgtId")
+    raw_obs   = obs_by_tgt.get("observations", [])
+    decoded_obs = [
+        decode_single_obs(tgt_id, item) if isinstance(item, str) else item
+        for item in raw_obs
+    ]
+    return {**obs_by_tgt, "observations": decoded_obs}
+
+
+def decode_v2x_pdu(pdu_type: int, hex_val: str):
+    """Decode one element from V2xPduStream.v2xPdus (SEQUENCE OF ANY)."""
+    if pdu_type == OBS_PDU_IEEE1609DOT2:
+        return decode_oer("Ieee1609Dot2Data", hex_to_bytes(hex_val))
+    # type=1 (ObsPduEtsiGn) and anything else: keep as hex
+    return hex_val
+
+
+def enrich_v2x_stream(stream: dict) -> dict:
+    """Decode v2xPdus SEQUENCE OF ANY entries in a V2xPduStream."""
+    pdu_type   = stream.get("type")
+    raw_pdus   = stream.get("v2xPdus", [])
+    decoded_pdus = [
+        decode_v2x_pdu(pdu_type, item) if isinstance(item, str) else item
+        for item in raw_pdus
+    ]
+    return {**stream, "v2xPdus": decoded_pdus}
+
+
+def enrich_asr_bsm(content_hex: str) -> dict:
+    """Decode AidSpecificReport.content ANY as AsrBsm, then enrich recursively."""
+    asr = decode_oer("AsrBsm", hex_to_bytes(content_hex))
+
+    if "observations" in asr:
+        asr["observations"] = [
+            enrich_obs_by_target(o) for o in asr["observations"]
+        ]
+
+    if "v2xPduEvidence" in asr:
+        asr["v2xPduEvidence"] = [
+            enrich_v2x_stream(s) for s in asr["v2xPduEvidence"]
+        ]
+
+    return asr
+
+
+def enrich_mbr(mbr: dict) -> dict:
+    """Decode report.content ANY based on the aid field."""
+    report  = mbr.get("report", {})
+    aid     = report.get("aid")
+    content = report.get("content")
+
+    if aid == AID_BSM and isinstance(content, str):
+        report = {**report, "content": enrich_asr_bsm(content)}
+
+    return {**mbr, "report": report}
+
+
+def enrich_mbr_sec(mbr_sec: dict) -> dict:
+    """Handle one SaeJ3287MbrSec CHOICE element."""
+    if "plaintext" in mbr_sec:
+        return {"plaintext": enrich_mbr(mbr_sec["plaintext"])}
+    # signed / sTE: pass through as-is (already decoded by libdecode)
+    return mbr_sec
+
+
+def enrich_sae_j3287_data(data: dict) -> dict:
+    """Top-level enrichment of a SaeJ3287Data object."""
+    content = data.get("content")
+    if content is not None:
+        data = {**data, "content": enrich_mbr_sec(content)}
+    return data
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Recursive OER/COER decoder for SaeJ3287 messages"
+    )
+    parser.add_argument("file", help="Input .coer file")
+    parser.add_argument(
+        "--type",
+        choices=["SaeJ3287Data", "SaeJ3287Mbr"],
+        default="SaeJ3287Data",
+        help="Top-level PDU type (default: SaeJ3287Data). "
+             "Use SaeJ3287Mbr for raw MBR files (e.g. jason_mbr.coer).",
+    )
+    args = parser.parse_args()
+
+    with open(args.file, 'rb') as f:
+        raw = f.read()
+
+    pdu_type = args.type
+    if pdu_type == "SaeJ3287Data" and raw[0] != 0x01:
+        # SaeJ3287Data starts with version=1 (0x01).
+        # A bare SaeJ3287Mbr starts with Time64 (high byte 0x00 for current timestamps).
+        print(
+            "Warning: first byte is not 0x01; auto-switching to --type SaeJ3287Mbr",
+            file=sys.stderr,
+        )
+        pdu_type = "SaeJ3287Mbr"
+
+    if pdu_type == "SaeJ3287Mbr":
+        top      = decode_oer("SaeJ3287Mbr", raw)
+        enriched = enrich_mbr(top)
+    else:
+        top      = decode_oer("SaeJ3287Data", raw)
+        enriched = enrich_sae_j3287_data(top)
+
+    print(json.dumps(enriched, indent=2))
+
+
+if __name__ == "__main__":
+    main()
