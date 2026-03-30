@@ -11,6 +11,12 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 | `gcc` | Compile `lib/libdecode.so` |
 | `lib/libdecode.so` | Required at runtime by both scripts |
 
+Install Python dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
 Build the shared library once before using either script:
 
 ```bash
@@ -48,7 +54,7 @@ python3 create_mbr.py \
 
 ```bash
 python3 create_mbr.py \
-    --bsm Misbehavior-Detection/misbehavior-detection/data/Ieee1609Dot2Data/Ieee1609Dot2Data_bad_accel.coer \
+    --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
     --out-dir coer/
 ```
 
@@ -151,16 +157,13 @@ ASN1/
 ├── c_code/                 Generated C code + handwritten shim (decode_shim.{h,c})
 ├── stubs/                  C-2ENT stub (ANY replacement for IOC CLASS open types)
 ├── lib/                    libdecode.so (compiled by build_asn_lib.sh)
-├── bin/                    Standalone test binaries (per-PDU, for ad-hoc testing)
 ├── coer/                   Sample COER files and decoded JSON outputs
-├── docs/                   Reference standards (IEEE 1609.2, SAE J3287, ETSI TS 103759)
-├── Misbehavior-Detection/  Submodule: faulty-BSM generator + detection algorithms
 ├── create_mbr.py           MBR encoder
 ├── decode_mbr.py           MBR decoder
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
 ├── build_asn_lib.sh        Compile c_code/ → lib/libdecode.so
 ├── compile_asn1.sh         Run asn1c on J3287_ASN_flat/ → c_code/
-└── compile.sh              Thin wrapper: compile a single-PDU test binary
+└── requirements.txt        Python dependencies
 ```
 
 ## Key Standards
