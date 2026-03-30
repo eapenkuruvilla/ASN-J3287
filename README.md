@@ -86,6 +86,9 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 │  0. BUILD TOOL  (one-time)                           │
 │                                                      │
 │  # Clone one level above this repo                   │
+│  # This fork is actively maintained and supports     │
+│  # newer features such as IOC (Information Object    │
+│  # Classes) not available in the upstream original.  │
 │  git clone https://github.com/mouse07410/asn1c       │
 │  cd asn1c && autoreconf -iv && ./configure           │
 │  make && sudo make install                           │
