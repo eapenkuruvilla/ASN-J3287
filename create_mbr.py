@@ -5,7 +5,7 @@ create_mbr.py - Build SaeJ3287Data from an input BSM (Ieee1609Dot2Data).
 Usage:
     python create_mbr.py \\
         --bsm  data/Ieee1609Dot2Data_bad_accel.coer \\
-        [--signing-key signer.pem] \\
+        [--certs-dir certs/e0c324c643aca860] \\
         [--recipient-pub <hex_uncompressed_pubkey>] \\
         [--out-dir coer/]
 
@@ -16,15 +16,14 @@ as IEEE 1609.2 V2xPduStream evidence.
 
 Produces:
     {out_dir}/out_plaintext.coer   -- SaeJ3287MbrSec.plaintext
-    {out_dir}/out_signed.coer      -- SaeJ3287MbrSec.signed (if --signing-key)
-    {out_dir}/out_ste.coer         -- SaeJ3287MbrSec.sTE    (if both keys)
+    {out_dir}/out_signed.coer      -- SaeJ3287MbrSec.signed (if --certs-dir)
+    {out_dir}/out_ste.coer         -- SaeJ3287MbrSec.sTE    (if --certs-dir + --recipient-pub)
 
-Keys:
-    --signing-key   ECDSA P-256 private key — PEM file, or raw 32-byte scalar
-                    (e.g. certs/<id>/certchain/s)  (optional)
-    --cert          IEEE 1609.2 Certificate binary file to use as signer identity
-                    (e.g. certs/<id>/certchain/0).  If omitted a self-signed
-                    certificate is generated from the signing key.
+Certs:
+    --certs-dir     Path to the SCMS organisation cert store (e.g. certs/e0c324c643aca860).
+                    The script scans rsu-*/downloadFiles/*.cert under this directory,
+                    selects the currently valid certificate with the earliest expiry,
+                    and uses the corresponding .s key file for signing.
     --recipient-pub Recipient P-256 public key, hex-encoded, uncompressed
                     (65 bytes: 04 || x || y, or 64 bytes without the 04 prefix)
                     (optional)
@@ -501,6 +500,81 @@ def load_signing_key(path: str):
                                                backend=default_backend())
 
 
+def parse_cert_validity(cert_bytes: bytes):
+    """Parse (start, expire) as UTC datetimes from an IEEE 1609.2 cert.
+
+    Scans for a ValidityPeriod: Time32 (4 bytes) followed by a Duration
+    CHOICE tag (0x80–0x86) and Uint16 value.  Collects all plausible matches
+    (start in 2015–2040 range, duration >= 1 hour) and returns the one with
+    the latest start — avoiding false positives from incidental byte patterns
+    elsewhere in the cert with very short durations.
+    """
+    EPOCH = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
+    DURATION_SECS = {0: 1e-6, 1: 1e-3, 2: 1, 3: 60, 4: 3600, 5: 216000, 6: 365.25 * 86400}
+    lo = datetime.datetime(2015, 1, 1, tzinfo=datetime.timezone.utc)
+    hi = datetime.datetime(2040, 1, 1, tzinfo=datetime.timezone.utc)
+    candidates = []
+    for i in range(len(cert_bytes) - 6):
+        tag = cert_bytes[i + 4]
+        if 0x80 <= tag <= 0x86:
+            t = struct.unpack_from('>I', cert_bytes, i)[0]
+            start = EPOCH + datetime.timedelta(seconds=t)
+            if lo <= start <= hi:
+                alt = tag & 0x07
+                val = struct.unpack_from('>H', cert_bytes, i + 5)[0]
+                secs = val * DURATION_SECS[alt]
+                if secs >= 3600:  # ignore durations shorter than 1 hour (false positives)
+                    try:
+                        expire = start + datetime.timedelta(seconds=secs)
+                    except OverflowError:
+                        continue
+                    candidates.append((start, expire))
+    if not candidates:
+        raise ValueError("Could not parse validity period from certificate")
+    return max(candidates, key=lambda x: x[0])  # latest start
+
+
+def select_rsu_cert(certs_dir: str):
+    """Scan rsu-*/downloadFiles/*.cert under certs_dir and return (cert_path, key_path)
+    for the currently valid certificate with the earliest expiry.
+    Exits with an error if no valid certificate is found.
+    """
+    import glob
+    now = datetime.datetime.now(datetime.timezone.utc)
+    candidates = []
+    for cert_path in sorted(glob.glob(
+            os.path.join(certs_dir, 'rsu-*/downloadFiles/*.cert'))):
+        key_path = cert_path[:-5] + '.s'
+        if not os.path.exists(key_path):
+            continue
+        try:
+            start, expire = parse_cert_validity(open(cert_path, 'rb').read())
+        except ValueError:
+            continue
+        if start <= now < expire:
+            candidates.append((expire, cert_path, key_path))
+    if not candidates:
+        print(f"ERROR: no valid RSU certificate found under {certs_dir} "
+              f"(current UTC time: {now.strftime('%Y-%m-%d %H:%M:%S')})",
+              file=sys.stderr)
+        # Print all certs found with their validity windows to aid diagnosis
+        for cert_path in sorted(glob.glob(
+                os.path.join(certs_dir, 'rsu-*/downloadFiles/*.cert'))):
+            try:
+                start, expire = parse_cert_validity(open(cert_path, 'rb').read())
+                status = "not yet valid" if now < start else "expired"
+                print(f"  {cert_path}: {start.strftime('%Y-%m-%d %H:%M')} – "
+                      f"{expire.strftime('%Y-%m-%d %H:%M')} UTC  [{status}]",
+                      file=sys.stderr)
+            except ValueError:
+                print(f"  {cert_path}: could not parse validity period",
+                      file=sys.stderr)
+        sys.exit(1)
+    candidates.sort()
+    _, cert_path, key_path = candidates[0]
+    return cert_path, key_path
+
+
 def load_recipient_pub(hex_str: str) -> bytes:
     data = bytes.fromhex(hex_str.replace(':', '').replace(' ', ''))
     if len(data) == 64:
@@ -643,13 +717,10 @@ def main():
     p = argparse.ArgumentParser(
         description="Build SaeJ3287Data COER variants (plaintext / signed / sTE)"
     )
-    p.add_argument("--signing-key",
-                   help="ECDSA P-256 private key — PEM file or raw 32-byte scalar "
-                        "(e.g. certs/<id>/certchain/s); omit to skip signed and sTE variants")
-    p.add_argument("--cert",
-                   help="IEEE 1609.2 Certificate binary file to embed as signer "
-                        "(e.g. certs/<id>/certchain/0); if omitted a self-signed "
-                        "certificate is generated from --signing-key")
+    p.add_argument("--certs-dir",
+                   help="SCMS organisation cert store directory (e.g. certs/e0c324c643aca860); "
+                        "the currently valid rsu-*/downloadFiles/ cert is selected automatically; "
+                        "omit to skip signed and sTE variants")
     p.add_argument("--recipient-pub",
                    help="Recipient P-256 public key, hex-encoded uncompressed "
                         "(64 or 65 bytes); omit to skip sTE variant")
@@ -659,8 +730,6 @@ def main():
                    help="Output directory (default: coer/)")
     p.add_argument("--psid", type=int, default=38,
                    help="PSID for headerInfo (default: 38 = MBR)")
-    p.add_argument("--cert-days", type=int, default=7,
-                   help="Certificate validity in days (default: 7)")
     p.add_argument("--lat",  type=int, default=None,
                    help="observationLocation latitude in 1e-7 deg units "
                         "(default: derived from IP geolocation)")
@@ -673,7 +742,16 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    signing_key = load_signing_key(args.signing_key) if args.signing_key else None
+    if args.certs_dir:
+        cert_path, key_path = select_rsu_cert(args.certs_dir)
+        signing_key = load_signing_key(key_path)
+        cert_bytes_selected = open(cert_path, 'rb').read()
+        print(f"  Selected cert: {cert_path} "
+              f"(SHA-256: {hashlib.sha256(cert_bytes_selected).hexdigest()[:16]}...)",
+              file=sys.stderr)
+    else:
+        signing_key = None
+        cert_bytes_selected = None
     recipient_pub = load_recipient_pub(args.recipient_pub) if args.recipient_pub else None
     with open(args.bsm, 'rb') as f:
         bsm_bytes = f.read()
@@ -696,29 +774,11 @@ def main():
     )
 
     if signing_key is None:
-        print("  (skipping signed and sTE variants: no --signing-key provided)",
+        print("  (skipping signed and sTE variants: no --certs-dir provided)",
               file=sys.stderr)
         return
 
-    # Certificate (used for signed and sTE variants)
-    if args.cert:
-        with open(args.cert, 'rb') as f:
-            cert_bytes = f.read()
-        print(f"  Certificate: {len(cert_bytes)} bytes from {args.cert} "
-              f"(SHA-256: {hashlib.sha256(cert_bytes).hexdigest()[:16]}...)",
-              file=sys.stderr)
-    else:
-        start = tai32_now()
-        cert_bytes = build_certificate(
-            signing_key,
-            start=start,
-            hours=args.cert_days * 24,
-            psids=[32, 38],
-            name="test-signer",
-        )
-        print(f"  Certificate: {len(cert_bytes)} bytes (self-signed) "
-              f"(SHA-256: {hashlib.sha256(cert_bytes).hexdigest()[:16]}...)",
-              file=sys.stderr)
+    cert_bytes = cert_bytes_selected
 
     # Signed: SaeJ3287MbrSec.signed = Ieee1609Dot2Data { signedData }
     signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid)
