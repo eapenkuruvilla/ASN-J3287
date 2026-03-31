@@ -31,6 +31,7 @@ Certs:
 
 import argparse
 import datetime
+import glob
 import hashlib
 import hmac as _hmac
 import os
@@ -456,7 +457,7 @@ def tai32_now() -> int:
     """Current time as Time32: TAI seconds since 2004-01-01 00:00:00 UTC."""
     epoch = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
     utc_now = datetime.datetime.now(tz=datetime.timezone.utc)
-    return int((utc_now - epoch).total_seconds()) + 37   # +37 TAI–UTC leap seconds
+    return int((utc_now - epoch).total_seconds()) + 37   # +37 TAI–UTC leap seconds (current as of 2017-01-01; update when next leap second is announced)
 
 
 def geolocate_ip() -> tuple:
@@ -539,7 +540,6 @@ def select_rsu_cert(certs_dir: str):
     for the currently valid certificate with the earliest expiry.
     Exits with an error if no valid certificate is found.
     """
-    import glob
     now = datetime.datetime.now(datetime.timezone.utc)
     candidates = []
     for cert_path in sorted(glob.glob(
@@ -548,7 +548,8 @@ def select_rsu_cert(certs_dir: str):
         if not os.path.exists(key_path):
             continue
         try:
-            start, expire = parse_cert_validity(open(cert_path, 'rb').read())
+            with open(cert_path, 'rb') as fh:
+                start, expire = parse_cert_validity(fh.read())
         except ValueError:
             continue
         if start <= now < expire:
@@ -561,7 +562,8 @@ def select_rsu_cert(certs_dir: str):
         for cert_path in sorted(glob.glob(
                 os.path.join(certs_dir, 'rsu-*/downloadFiles/*.cert'))):
             try:
-                start, expire = parse_cert_validity(open(cert_path, 'rb').read())
+                with open(cert_path, 'rb') as fh:
+                    start, expire = parse_cert_validity(fh.read())
                 status = "not yet valid" if now < start else "expired"
                 print(f"  {cert_path}: {start.strftime('%Y-%m-%d %H:%M')} – "
                       f"{expire.strftime('%Y-%m-%d %H:%M')} UTC  [{status}]",
@@ -745,7 +747,8 @@ def main():
     if args.certs_dir:
         cert_path, key_path = select_rsu_cert(args.certs_dir)
         signing_key = load_signing_key(key_path)
-        cert_bytes_selected = open(cert_path, 'rb').read()
+        with open(cert_path, 'rb') as fh:
+            cert_bytes_selected = fh.read()
         print(f"  Selected cert: {cert_path} "
               f"(SHA-256: {hashlib.sha256(cert_bytes_selected).hexdigest()[:16]}...)",
               file=sys.stderr)

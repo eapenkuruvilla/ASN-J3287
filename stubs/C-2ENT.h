@@ -28,5 +28,6 @@ asn_constr_check_f C_2ENT_constraint;
 }
 #endif
 
-#endif /* _C_2ENT_H_ */
 #include <asn_internal.h>
+
+#endif /* _C_2ENT_H_ */
