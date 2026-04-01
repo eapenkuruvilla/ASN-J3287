@@ -34,7 +34,27 @@ int decode_oer_to_jer(
     char      **json_out,
     char       *err_buf, size_t err_size);
 
-/* Free a buffer previously returned by decode_oer_to_jer. */
+/*
+ * Encode a JER (JSON) string as the named PDU type, returning OER/COER bytes.
+ *
+ * pdu_name  : C identifier of the PDU (hyphens replaced with underscores)
+ * json_in   : NUL-terminated JER JSON string
+ * oer_out   : on success, set to a malloc'd byte buffer;
+ *             caller must free with free_buffer()
+ * oer_len   : on success, set to the number of bytes in *oer_out
+ * err_buf   : on failure, filled with a NUL-terminated error description
+ * err_size  : capacity of err_buf
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+int encode_jer_to_oer(
+    const char *pdu_name,
+    const char *json_in,
+    void      **oer_out,
+    size_t     *oer_len,
+    char       *err_buf, size_t err_size);
+
+/* Free a buffer previously returned by decode_oer_to_jer or encode_jer_to_oer. */
 void free_buffer(void *ptr);
 
 #endif /* DECODE_SHIM_H */

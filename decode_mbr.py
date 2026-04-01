@@ -10,13 +10,10 @@ Requires: lib/libdecode.so  (run ./build_asn_lib.sh once to build it)
 """
 
 import argparse
-import sys
-import os
 import json
-import ctypes
+import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LIB_PATH   = os.path.join(SCRIPT_DIR, 'lib', 'libdecode.so')
+from asn1c_lib import decode_oer, encode_jer
 
 # AID constants (PSID)
 AID_BSM = 32
@@ -44,74 +41,6 @@ BSM_SECURITY_OBS_NAMES = {
 BSM_LONGACC_OBS_NAMES = {
     4: "ValueTooLarge",
 }
-
-
-# ── libdecode.so ctypes interface ─────────────────────────────────────────────
-
-_lib = None
-
-def _get_lib():
-    global _lib
-    if _lib is not None:
-        return _lib
-    if not os.path.exists(LIB_PATH):
-        print(
-            f"ERROR: {LIB_PATH} not found.\n"
-            "Run ./build_asn_lib.sh to compile the decoder library.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    lib = ctypes.CDLL(LIB_PATH)
-    lib.decode_oer_to_jer.restype  = ctypes.c_int
-    lib.decode_oer_to_jer.argtypes = [
-        ctypes.c_char_p,                    # pdu_name
-        ctypes.c_char_p,                    # data  (binary — length passed separately)
-        ctypes.c_size_t,                    # data_len
-        ctypes.POINTER(ctypes.c_char_p),    # json_out  (malloc'd; free with free_buffer)
-        ctypes.c_char_p,                    # err_buf
-        ctypes.c_size_t,                    # err_size
-    ]
-    lib.free_buffer.restype  = None
-    lib.free_buffer.argtypes = [ctypes.c_void_p]
-    _lib = lib
-    return _lib
-
-
-def decode_oer(pdu_name: str, data: bytes) -> dict:
-    """Decode raw OER/COER bytes as pdu_name, return parsed JER dict."""
-    lib = _get_lib()
-
-    # asn1c uses underscores in C identifiers; hyphens are not valid.
-    c_name  = pdu_name.replace('-', '_').encode()
-    err_buf = ctypes.create_string_buffer(4096)
-    json_out = ctypes.c_char_p(None)
-
-    rc = lib.decode_oer_to_jer(
-        c_name,
-        data, len(data),
-        ctypes.byref(json_out),
-        err_buf, len(err_buf),
-    )
-
-    if rc != 0:
-        # Format a hex dump so the failing bytes are easy to inspect.
-        hex_lines = []
-        for i in range(0, len(data), 16):
-            chunk    = data[i:i+16]
-            hex_part = ' '.join(f'{b:02X}' for b in chunk)
-            asc_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-            hex_lines.append(f"  {i:04X}  {hex_part:<47}  {asc_part}")
-        raise ValueError(
-            f"Decode failed for {pdu_name}: {err_buf.value.decode()}\n"
-            f"Input ({len(data)} bytes):\n" + '\n'.join(hex_lines)
-        )
-
-    try:
-        result = json.loads(json_out.value.decode('utf-8'))
-    finally:
-        lib.free_buffer(json_out)
-
-    return result
 
 
 # ── Enrichment helpers (recursive open-type decoding) ─────────────────────────

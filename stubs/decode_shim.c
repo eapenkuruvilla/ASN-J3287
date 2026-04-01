@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include <jer_encoder.h>
 #include <constr_TYPE.h>
 
@@ -106,4 +107,49 @@ int decode_oer_to_jer(
 void free_buffer(void *ptr)
 {
     free(ptr);
+}
+
+int encode_jer_to_oer(
+    const char *pdu_name,
+    const char *json_in,
+    void      **oer_out,
+    size_t     *oer_len,
+    char       *err_buf, size_t err_size)
+{
+    *oer_out = NULL;
+    *oer_len = 0;
+
+    asn_TYPE_descriptor_t *td = find_pdu(pdu_name);
+    if (!td) {
+        snprintf(err_buf, err_size, "Unknown PDU type: '%s'", pdu_name);
+        return -1;
+    }
+
+    /* Decode JER → in-memory ASN.1 structure */
+    void *sptr = NULL;
+    asn_dec_rval_t rval = asn_decode(
+        NULL, ATS_JER, td, &sptr, json_in, strlen(json_in));
+
+    if (rval.code != RC_OK) {
+        if (sptr) ASN_STRUCT_FREE(*td, sptr);
+        snprintf(err_buf, err_size,
+                 "JER decode failed at byte %zu (code %d)",
+                 rval.consumed, (int)rval.code);
+        return -1;
+    }
+
+    /* Encode in-memory structure → COER bytes */
+    asn_encode_to_new_buffer_result_t res =
+        asn_encode_to_new_buffer(NULL, ATS_BASIC_OER, td, sptr);
+    ASN_STRUCT_FREE(*td, sptr);
+
+    if (!res.buffer) {
+        snprintf(err_buf, err_size,
+                 "OER encode failed (errno=%d)", errno);
+        return -1;
+    }
+
+    *oer_out = res.buffer;
+    *oer_len = (size_t)res.result.encoded;
+    return 0;
 }
