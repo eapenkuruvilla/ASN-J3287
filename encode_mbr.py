@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-encode_mbr.py - Build SaeJ3287 messages encoded via asn1c (libdecode.so).
+encode_mbr.py - Build SaeJ3287 messages encoded via asn1c (libasn1c.so).
 
 Public API:
     build_mbr_from_bsm(bsm_bytes, lat, lon, elev) -> bytes  SaeJ3287Mbr COER
@@ -8,7 +8,7 @@ Public API:
     build_encrypted_1609(signed_1609_bytes, recipient_pub_uncompressed) -> bytes
 
 All structural encoding is delegated to encode_jer() / decode_oer() which call
-the asn1c-generated codec in lib/libdecode.so.
+the asn1c-generated codec in lib/libasn1c.so.
 """
 
 import hashlib
@@ -84,7 +84,7 @@ def build_mbr_from_bsm(bsm_bytes: bytes,
 
     Hard-codes a LongAcc-ValueTooLarge observation (tgtId=5, obsId=4, obs=NULL).
     Extracts generationTime from the BSM headerInfo.
-    Encoding is schema-validated via libdecode.so (encode_jer).
+    Encoding is schema-validated via libasn1c.so (encode_jer).
     """
     bsm_json = decode_oer("Ieee1609Dot2Data", bsm_bytes)
     gen_time = _extract_bsm_gen_time(bsm_json)

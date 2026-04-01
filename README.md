@@ -10,8 +10,8 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 | `cryptography` (pip) | ECDSA signing, AES-CCM encryption |
 | `requests` (pip) | IP geolocation for default lat/lon |
 | `pycrate` (pip) | J2735 UPER decoding (`decode_j2735.py`) |
-| `gcc` | Compile `lib/libdecode.so` |
-| `lib/libdecode.so` | Required at runtime by `create_mbr.py` and `decode_mbr.py` |
+| `gcc` | Compile `lib/libasn1c.so` |
+| `lib/libasn1c.so` | Required at runtime by `create_mbr.py` and `decode_mbr.py` |
 | `asn/J2735ASN_202409/` | J2735 ASN.1 schema files (required by `decode_j2735.py`) |
 
 Install Python dependencies:
@@ -20,7 +20,7 @@ Install Python dependencies:
 pip install -r requirements.txt
 ```
 
-See the [Process Flow](#process-flow) section for one-time setup steps (building `asn1c` and compiling `lib/libdecode.so`).
+See the [Process Flow](#process-flow) section for one-time setup steps (building `asn1c` and compiling `lib/libasn1c.so`).
 
 ## Usage
 
@@ -45,9 +45,9 @@ python3 create_mbr.py \
 
 | File | Type | Requires |
 |------|------|---------|
-| `out_plaintext.coer` | `SaeJ3287MbrSec.plaintext` | always |
-| `out_signed.coer` | `SaeJ3287MbrSec.signed` | `--certs-dir` |
-| `out_ste.coer` | `SaeJ3287MbrSec.sTE` | `--certs-dir` + `--recipient-pub` |
+| `out_plaintext.coer` | `SaeJ3287Data { version=1, content: plaintext(SaeJ3287Mbr) }` | always |
+| `out_signed.coer` | `SaeJ3287Data { version=1, content: signed(Ieee1609Dot2Data) }` | `--certs-dir` |
+| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | `--certs-dir` + `--recipient-pub` |
 
 **Example — plaintext only:**
 
@@ -135,7 +135,7 @@ The response body is the raw COER-encoded `Certificate` (binary, `application/oc
 | `GET /v3/ra-certificate` | Available — returns RA's own certificate |
 | `GET /v3/certificate-management-info-status` | Available — returns CRL/CTL/MA status (no cert payload) |
 
-SaeSol's RA does not expose the `ma-certificate` endpoint. The MA certificate was instead obtained as a decoded-JER JSON file emailed by SaeSol and is stored at `certs/aesol_ma_bublic_key.json`. Use `encode_cert_json.py` to convert it to COER (see below).
+SaeSol's RA does not expose the `ma-certificate` endpoint. The MA certificate was instead obtained as a decoded-JER JSON file emailed by SaeSol and is stored at `certs/saesol_ma_bublic_key.json`. Use `encode_cert_json.py` to convert it to COER (see below).
 
 **Standard authentication options** (§6.3.5.13) for the `ma-certificate` endpoint when it is available:
 
@@ -172,7 +172,7 @@ python3 encode_cert_json.py <cert.json> [--out <output.cert>] [--hex]
 **Example:**
 
 ```bash
-python3 encode_cert_json.py certs/aesol_ma_bublic_key.json --out certs/saesol_ma_public_key.cert
+python3 encode_cert_json.py certs/saesol_ma_bublic_key.json --out certs/saesol_ma_public_key.cert
 ```
 
 Output:
@@ -287,7 +287,7 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 │    → generates asn1c_code/pdu_table.c (PDU dispatch)     │
 │    → gcc -shared -fPIC asn1c_code/*.c                    │
 │         │                                            │
-│  lib/libdecode.so                                    │
+│  lib/libasn1c.so                                    │
 └──────────────────────────────────────────────────────┘
          │
          ├─────────────────────┐
@@ -299,7 +299,7 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 │  BSM (.coer)    │   │  SaeJ3287Data or                │
 │       │         │   │  SaeJ3287Mbr (.coer)            │
 │  ① decode BSM   │   │       │                         │
-│    (generationTime)│  │  ① libdecode.so: OER → JER    │
+│    (generationTime)│  │  ① libasn1c.so: OER → JER    │
 │  ② build MBR    │   │  ② enrich open types:           │
 │    LongAcc obs  │   │    · AidSpecificReport.content  │
 │  ③ wrap/sign/   │   │      → AsrBsm                   │
@@ -324,8 +324,8 @@ ASN1/
 ├── asn1c_code/                 Generated C code (populated by compile_asn1.sh)
 ├── stubs/                  Handwritten C files copied into asn1c_code/ by compile_asn1.sh:
 │                             C-2ENT.{h,c}      — ANY replacement for IOC CLASS open types
-│                             decode_shim.{h,c} — OER→JER decoder entry point for libdecode.so
-├── lib/                    libdecode.so (compiled by build_asn_lib.sh)
+│                             decode_shim.{h,c} — OER→JER decoder entry point for libasn1c.so
+├── lib/                    libasn1c.so (compiled by build_asn_lib.sh)
 ├── certs/                  SCMS certificate store
 │   ├── <OrgId>/            RSU application certificates (used for signing MBRs)
 │   │   └── rsu-N/          One directory per RSU
@@ -338,14 +338,14 @@ ASN1/
 │   ├── pseudonym/          OBU pseudonym certificates (not used by this toolkit)
 │   └── iss_ma_public_key.cert  ISS MA certificate (recipient key for encrypted MBRs)
 ├── coer/                   Sample COER files and decoded JSON outputs
-├── asn1c_lib.py            ctypes interface to lib/libdecode.so (decode_oer / encode_jer)
+├── asn1c_lib.py            ctypes interface to lib/libasn1c.so (decode_oer / encode_jer)
 ├── encode_mbr.py           MBR/1609.2 message construction (build_mbr_from_bsm, build_signed_1609, build_encrypted_1609)
 ├── decode_mbr.py           MBR decoder — enrichment helpers + CLI
 ├── create_mbr.py           CLI entry point — cert selection, geolocation, main()
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── encode_cert_json.py     MA certificate JSON → COER encoder (derives P1, HashedId8, --recipient-pub)
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
-├── build_asn_lib.sh        Compile asn1c_code/ → lib/libdecode.so
+├── build_asn_lib.sh        Compile asn1c_code/ → lib/libasn1c.so
 ├── compile_asn1.sh         Run asn1c on asn/J3287_ASN_flat/ → asn1c_code/
 └── requirements.txt        Python dependencies
 ```

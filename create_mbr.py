@@ -52,13 +52,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def tai32_now() -> int:
-    """Current time as Time32: TAI seconds since 2004-01-01 00:00:00 UTC."""
-    epoch = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
-    utc_now = datetime.datetime.now(tz=datetime.timezone.utc)
-    return int((utc_now - epoch).total_seconds()) + 37   # +37 TAI–UTC leap seconds (current as of 2017-01-01; update when next leap second is announced)
-
-
 def geolocate_ip() -> tuple:
     """Return (lat, lon, elev) based on current public IP via ip-api.com.
 

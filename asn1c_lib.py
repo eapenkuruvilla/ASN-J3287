@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-asn1c_lib.py - ctypes interface to lib/libdecode.so (asn1c-generated codec).
+asn1c_lib.py - ctypes interface to lib/libasn1c.so (asn1c-generated codec).
 
 Exports:
     decode_oer(pdu_name, data)  -> dict   Decode COER bytes to a JER dict.
     encode_jer(pdu_name, obj)   -> bytes  Encode a JER dict to COER bytes.
 
-Requires: lib/libdecode.so  (run ./build_asn_lib.sh on the Ubuntu host to build it)
+Requires: lib/libasn1c.so  (run ./build_asn_lib.sh on the Ubuntu host to build it)
 """
 
 import ctypes
@@ -15,7 +15,7 @@ import os
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LIB_PATH   = os.path.join(SCRIPT_DIR, 'lib', 'libdecode.so')
+LIB_PATH   = os.path.join(SCRIPT_DIR, 'lib', 'libasn1c.so')
 
 _lib = None
 

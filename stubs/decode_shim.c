@@ -1,5 +1,5 @@
 /*
- * decode_shim.c — unified OER→JER decoder for libdecode.so.
+ * decode_shim.c — unified OER→JER decoder for libasn1c.so.
  *
  * Exports:
  *   decode_oer_to_jer()  – decode COER bytes as a named PDU, return JSON

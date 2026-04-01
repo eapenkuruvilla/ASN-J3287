@@ -6,7 +6,7 @@ Usage: python3 decode_mbr.py <file.coer>
 
 Outputs a JSON object to stdout with recursively decoded fields.
 
-Requires: lib/libdecode.so  (run ./build_asn_lib.sh once to build it)
+Requires: lib/libasn1c.so  (run ./build_asn_lib.sh once to build it)
 """
 
 import argparse

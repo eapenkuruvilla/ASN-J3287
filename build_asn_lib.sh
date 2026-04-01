@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# build_asn_lib.sh — compile asn1c_code/ into lib/libdecode.so
+# build_asn_lib.sh — compile asn1c_code/ into lib/libasn1c.so
 #
 # Usage:  ./build_asn_lib.sh
 #
 # Steps:
 #   1. Scan asn1c_code/*.h for asn_TYPE_descriptor_t declarations.
 #   2. Auto-generate asn1c_code/pdu_table.c with the full PDU dispatch table.
-#   3. Compile all asn1c_code/*.c + skeletons into lib/libdecode.so.
+#   3. Compile all asn1c_code/*.c + skeletons into lib/libasn1c.so.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-C_CODE="$SCRIPT_DIR/asn1c_code"
+ASN1C_CODE="$SCRIPT_DIR/asn1c_code"
 LIB_DIR="$SCRIPT_DIR/lib"
 SKELETONS="$SCRIPT_DIR/../asn1c/skeletons"
-PDU_TABLE="$C_CODE/pdu_table.c"
-OUT="$LIB_DIR/libdecode.so"
+PDU_TABLE="$ASN1C_CODE/pdu_table.c"
+OUT="$LIB_DIR/libasn1c.so"
 
 mkdir -p "$LIB_DIR"
 
@@ -25,7 +25,7 @@ echo "==> Scanning asn1c_code/ for PDU types..."
 # Extract C identifier names from lines like:
 #   extern asn_TYPE_descriptor_t asn_DEF_Foo_Bar;
 # Skip decode_shim.h (handwritten) and pdu_table itself.
-pdu_names=$(grep -h "asn_TYPE_descriptor_t asn_DEF_" "$C_CODE"/*.h 2>/dev/null \
+pdu_names=$(grep -h "asn_TYPE_descriptor_t asn_DEF_" "$ASN1C_CODE"/*.h 2>/dev/null \
     | grep -v '^\s*//'                 \
     | grep -v 'decode_shim'            \
     | sed 's/.*asn_DEF_\([A-Za-z0-9_]*\).*/\1/' \
@@ -41,7 +41,7 @@ echo "==> Generating $PDU_TABLE..."
     printf '#include "decode_shim.h"\n\n'
 
     # Include every header that declares at least one asn_DEF_
-    for h in "$C_CODE"/*.h; do
+    for h in "$ASN1C_CODE"/*.h; do
         base=$(basename "$h")
         [[ "$base" == "decode_shim.h" ]] && continue
         if grep -q "asn_TYPE_descriptor_t asn_DEF_" "$h" 2>/dev/null; then
@@ -61,11 +61,11 @@ echo "==> Generating $PDU_TABLE..."
 # ── Step 3: compile shared library ──────────────────────────────────────────
 echo "==> Compiling $OUT..."
 
-src_files=$(find "$C_CODE" -maxdepth 1 -name "*.c" ! -name "converter-example.c" | sort)
+src_files=$(find "$ASN1C_CODE" -maxdepth 1 -name "*.c" ! -name "converter-example.c" | sort)
 
 gcc -shared -fPIC \
     -I"$SKELETONS" \
-    -I"$C_CODE"    \
+    -I"$ASN1C_CODE"    \
     $src_files     \
     -o "$OUT"
 
