@@ -109,6 +109,90 @@ For RSUs, `downloadFiles/<HashedId8>.cert` and `downloadFiles/<HashedId8>.s` are
 
 `create_mbr.py` uses the `downloadFiles/` cert and key via `--cert` and `--signing-key`.
 
+### Obtaining the MA Certificate from an RA (IEEE 1609.2.1 §6.3.5.13)
+
+IEEE 1609.2.1-2022 §6.3.5.13 defines a standard REST endpoint for downloading the MA certificate:
+
+```
+GET https://{ra-host}/v3/ma-certificate?psid={hex-psid}
+```
+
+where `{hex-psid}` is the minimal-length hex encoding of the PSID for the application being reported (e.g. `20` for BSM, PSID 32 = 0x20).
+
+**Example (ISS pre-production RA):**
+
+```bash
+curl "https://ra.preprod.v2x.isscms.com/v3/ma-certificate?psid=20"
+```
+
+The response body is the raw COER-encoded `Certificate` (binary, `application/octet-stream`). Save it directly as a `.cert` file.
+
+**SaeSol RA (`ra.v2x-scms.saesoltech.io`) — deployment status:**
+
+| Endpoint | Status |
+|----------|--------|
+| `GET /v3/ma-certificate?psid=<hex>` | **Not implemented** (HTTP 404) |
+| `GET /v3/ra-certificate` | Available — returns RA's own certificate |
+| `GET /v3/certificate-management-info-status` | Available — returns CRL/CTL/MA status (no cert payload) |
+
+SaeSol's RA does not expose the `ma-certificate` endpoint. The MA certificate was instead obtained as a decoded-JER JSON file emailed by SaeSol and is stored at `certs/aesol_ma_bublic_key.json`. Use `encode_cert_json.py` to convert it to COER (see below).
+
+**Standard authentication options** (§6.3.5.13) for the `ma-certificate` endpoint when it is available:
+
+| Level | Option |
+|-------|--------|
+| Session | TLS 1.2/1.3 with X.509 client cert, or ISO/TS 21177 |
+| Web API | OAuth 2.0 Bearer token (`Authorization: Bearer <token>`) |
+| SCMS REST v3 | Enrollment certificate or X.509 |
+
+Unauthenticated access is permitted by some deployments (ISS pre-production allows it; SaeSol's profile is unknown since the endpoint is not deployed).
+
+### Encode MA Certificate JSON — `encode_cert_json.py`
+
+Converts a Misbehavior Authority (MA) certificate received in decoded-JER JSON format (e.g. emailed by a SCMS provider) into a COER-encoded `.cert` file, and prints the derived values needed for encrypted MBR generation.
+
+```bash
+python3 encode_cert_json.py <cert.json> [--out <output.cert>] [--hex]
+```
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `cert.json` | — | Input JSON file (required) |
+| `--out` | `<cert>.cert` | Output `.cert` file; defaults to input path with `.cert` extension |
+| `--hex` | off | Also print the full COER hex to stdout |
+
+**Output printed to terminal:**
+
+| Field | Use |
+|-------|-----|
+| `HashedId8` | `recipientId` in `PKRecipientInfo` (Issue 4 fix) |
+| `P1 (SHA256 cert)` | KDF2 P1 parameter for ECIES encryption (Issue 1 fix) |
+| `--recipient-pub` | Compressed public key argument for `create_mbr.py` |
+
+**Example:**
+
+```bash
+python3 encode_cert_json.py certs/aesol_ma_bublic_key.json --out certs/saesol_ma_public_key.cert
+```
+
+Output:
+```
+Output:           certs/saesol_ma_public_key.cert  (202 bytes)
+HashedId8:        CE248AFFB5F88ACD  ← recipientId in PKRecipientInfo
+P1 (SHA256 cert): F661E160F3BA781A610C1692DDB1E6DA0C0CED43CB75EE63CE248AFFB5F88ACD  ← KDF2 P1 for ECIES
+--recipient-pub:  03E2C31B52D6D83F7CE1F74336B68C545BB7ED8527D8D4ED267F3D3659694F7AD3
+```
+
+Use `--recipient-pub` value to produce a signed+encrypted MBR:
+
+```bash
+python3 create_mbr.py \
+    --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
+    --certs-dir certs/e0c324c643aca860 \
+    --recipient-pub 03E2C31B52D6D83F7CE1F74336B68C545BB7ED8527D8D4ED267F3D3659694F7AD3 \
+    --out-dir coer/
+```
+
 ### Decode J2735 BSM — `decode_j2735.py`
 
 Decodes a J2735 `MessageFrame` from a UPER hex string (e.g. the `unsecuredData` field in `decode_mbr.py` output) to JSON on stdout.
@@ -257,6 +341,7 @@ ASN1/
 ├── create_mbr.py           MBR encoder
 ├── decode_mbr.py           MBR decoder
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
+├── encode_cert_json.py     MA certificate JSON → COER encoder (derives P1, HashedId8, --recipient-pub)
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
 ├── build_asn_lib.sh        Compile c_code/ → lib/libdecode.so
 ├── compile_asn1.sh         Run asn1c on asn/J3287_ASN_flat/ → c_code/
