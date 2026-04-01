@@ -74,16 +74,16 @@ All certificates under `certs/` were downloaded from an SCMS provider (ISS) and 
 
 | Path | Content |
 |------|---------|
-| `certchain/0` | Active Authorization Ticket (AT / application cert, 79 bytes) |
-| `certchain/s` | Raw P-256 signing key scalar for `certchain/0` |
-| `certchain/1` | PCA certificate |
-| `certchain/2` | ICA certificate |
+| `certchain/0` | Enrollment certificate |
+| `certchain/1` | Issuer of cert 0 (Enrollment Certificate Authority) |
+| `certchain/2` | Issuer of cert 1 (Intermediate Certificate Authority) |
+| `certchain/s` | Private key reconstruction value for the enrollment signing key |
 | `trustedcerts/` | Root of trust: `rca`, `pca`, `ica`, `eca`, `ra` |
-| `enr_sign.prv` | Enrollment signing key (used during SCMS enrollment) |
-| `dwnl_sgn.priv` | Download signing key (authenticates cert download requests to SCMS) |
-| `dwnl_enc.priv` | Download encryption key (decrypts cert download responses from SCMS) |
-| `downloadFiles/<HashedId8>.cert` | Operational signing certificate for the RSU |
-| `downloadFiles/<HashedId8>.s` | Signing key for the above |
+| `enr_sgn.prv` | Enrollment private signing key |
+| `dwnl_sgn.priv` | Seed signing key for application certs (`k_seed` in ECQV reconstruction) |
+| `dwnl_enc.priv` | Seed encryption key for application certs |
+| `downloadFiles/<HashedId8>.cert` | Operational application certificate for the RSU (implicit / ECQV) |
+| `downloadFiles/<HashedId8>.s` | Private key reconstruction value `r`; actual key = `(r + k_seed) mod n` where `k_seed` = `dwnl_sgn.priv` |
 | `iss_ma_public_key.cert` | ISS pre-production MA (Misbehavior Authority) certificate (`ma.preprod.v2x.isscms.com`); contains the recipient public key for `--recipient-pub` when producing signed+encrypted MBRs (`out_ste.coer`). Obtained via `curl "https://ra.preprod.v2x.isscms.com/v3/ma-certificate?psid=20"` |
 
 **Certificate structure**

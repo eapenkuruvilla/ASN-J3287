@@ -9,10 +9,10 @@ Usage:
         [--recipient-pub <hex_uncompressed_pubkey>] \\
         [--out-dir coer/]
 
-The script reads the BSM, extracts generationTime and generationLocation from
-its headerInfo, hard-codes a LongAcc-ValueTooLarge observation (tgtId=5,
-obsId=4), and constructs a SaeJ3287Mbr (EtsiTs103759Mbr) that embeds the BSM
-as IEEE 1609.2 V2xPduStream evidence.
+The script reads the BSM, hard-codes a LongAcc-ValueTooLarge observation
+(tgtId=5, obsId=4), sets generationTime to the current TAI time, and
+constructs a SaeJ3287Mbr (EtsiTs103759Mbr) that embeds the BSM as
+IEEE 1609.2 V2xPduStream evidence.
 
 Produces:
     {out_dir}/out_plaintext.coer   -- SaeJ3287MbrSec.plaintext
@@ -43,7 +43,7 @@ except ImportError:
     _requests = None
 
 from asn1c_lib import decode_oer, encode_jer
-from encode_mbr import build_mbr_from_bsm, build_signed_1609, build_encrypted_1609
+from encode_mbr import build_mbr_from_bsm, build_signed_1609, build_encrypted_1609, tai64_now
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -79,16 +79,33 @@ def geolocate_ip() -> tuple:
 
 
 def load_signing_key(path: str):
-    """Load a P-256 signing key from a PEM file or a raw 32-byte scalar file.
+    """Load the actual P-256 signing key for an ISS SCMS application certificate.
 
-    Raw format: exactly 32 bytes, big-endian integer (e.g. certchain/s from
-    an SCMS certificate store).  Any other size is treated as PEM.
+    ISS SCMS issues implicit (ECQV) application certificates per IEEE 1609.2.
+    Per the ISS SCMS DMS Master Guide (Guidance Notes / File Structure):
+      - downloadFiles/<hash>.s   : private key reconstruction value  r  (32 bytes)
+      - rsu-N/dwnl_sgn.priv      : seed signing key for application certs  k_seed  (32 bytes)
+
+    Actual private key:  d = (r + k_seed) mod n   (P-256 curve order)
+
+    path is expected to be the .s file inside downloadFiles/.
+    Falls back to PEM if path does not point to a 32-byte raw scalar.
     """
+    # P-256 curve order
+    _N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
     with open(path, 'rb') as f:
         data = f.read()
+
     if len(data) == 32:
-        scalar = int.from_bytes(data, 'big')
+        r = int.from_bytes(data, 'big')
+        # dwnl_sgn.priv lives one level above downloadFiles/
+        seed_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'dwnl_sgn.priv')
+        with open(seed_path, 'rb') as f:
+            k_seed = int.from_bytes(f.read(), 'big')
+        scalar = (r + k_seed) % _N
         return ec.derive_private_key(scalar, ec.SECP256R1(), default_backend())
+
     return serialization.load_pem_private_key(data, password=None,
                                                backend=default_backend())
 
@@ -238,7 +255,9 @@ def main():
         lat, lon = args.lat, args.lon
 
     print("Building MBR from BSM...", file=sys.stderr)
-    mbr_bytes = build_mbr_from_bsm(bsm_bytes, lat=lat, lon=lon, elev=args.elev)
+    gen_time  = tai64_now()
+    mbr_bytes = build_mbr_from_bsm(bsm_bytes, lat=lat, lon=lon, elev=args.elev,
+                                    gen_time=gen_time)
     print("Writing:", file=sys.stderr)
 
     # Plaintext: SaeJ3287Data { version=1, content { plaintext: SaeJ3287Mbr } }
@@ -258,7 +277,8 @@ def main():
     cert_bytes = cert_bytes_selected
 
     # Signed: SaeJ3287Data { version=1, content { signed: Ieee1609Dot2Data { signedData } } }
-    signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid)
+    signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid,
+                                     gen_time=gen_time)
     write_file(
         os.path.join(args.out_dir, "out_signed.coer"),
         encode_jer("SaeJ3287Data", {

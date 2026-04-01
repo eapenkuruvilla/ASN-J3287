@@ -11,6 +11,7 @@ All structural encoding is delegated to encode_jer() / decode_oer() which call
 the asn1c-generated codec in lib/libasn1c.so.
 """
 
+import datetime
 import hashlib
 import hmac as _hmac
 import secrets
@@ -28,6 +29,18 @@ try:
     from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 except ImportError:
     from cryptography.hazmat.primitives.hashes import Prehashed
+
+
+# ── Time helpers ─────────────────────────────────────────────────────────────
+
+def tai64_now() -> int:
+    """Current time as Time64: TAI microseconds since 2004-01-01 00:00:00 UTC.
+    +37 accounts for leap seconds accumulated through 2017-01-01.
+    Update this offset when the next leap second is announced.
+    """
+    epoch = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
+    delta = datetime.datetime.now(tz=datetime.timezone.utc) - epoch
+    return int(delta.total_seconds() * 1_000_000) + 37 * 1_000_000
 
 
 # ── IEEE 1609.2 crypto helpers ────────────────────────────────────────────────
@@ -65,29 +78,19 @@ def _x963_kdf(z: bytes, length: int, p1: bytes = b'') -> bytes:
 
 # ── MBR building ──────────────────────────────────────────────────────────────
 
-def _extract_bsm_gen_time(bsm_json: dict) -> int:
-    """Extract generationTime from a decoded Ieee1609Dot2Data JER dict."""
-    t = (bsm_json
-         .get("content", {})
-         .get("signedData", {})
-         .get("tbsData", {})
-         .get("headerInfo", {})
-         .get("generationTime"))
-    if t is None:
-        raise ValueError("BSM headerInfo does not contain generationTime")
-    return t
-
-
 def build_mbr_from_bsm(bsm_bytes: bytes,
-                        lat: int = 0, lon: int = 0, elev: int = 0) -> bytes:
+                        lat: int = 0, lon: int = 0, elev: int = 0,
+                        gen_time: int = None) -> bytes:
     """Build a SaeJ3287Mbr from an Ieee1609Dot2Data BSM.
 
     Hard-codes a LongAcc-ValueTooLarge observation (tgtId=5, obsId=4, obs=NULL).
-    Extracts generationTime from the BSM headerInfo.
+    gen_time is the report creation time as Time64 (TAI microseconds since
+    2004-01-01). Pass the same value to build_signed_1609 so both timestamps
+    are identical. Defaults to the current time if not provided.
     Encoding is schema-validated via libasn1c.so (encode_jer).
     """
-    bsm_json = decode_oer("Ieee1609Dot2Data", bsm_bytes)
-    gen_time = _extract_bsm_gen_time(bsm_json)
+    if gen_time is None:
+        gen_time = tai64_now()
 
     obs_coer = encode_jer("MbSingleObservation_BsmLongAcc", {"obsId": 4, "obs": ""})
 
@@ -123,12 +126,17 @@ def build_mbr_from_bsm(bsm_bytes: bytes,
 # ── 1609.2 signing ────────────────────────────────────────────────────────────
 
 def build_signed_1609(mbr_bytes: bytes, signing_key,
-                      cert_bytes: bytes, psid: int = 38) -> bytes:
+                      cert_bytes: bytes, psid: int = 38,
+                      gen_time: int = None) -> bytes:
     """Build Ieee1609Dot2Data { signedData } over mbr_bytes.
 
     Two-pass: encode ToBeSignedData first (COER bytes for signing hash),
     then encode the full Ieee1609Dot2Data with the computed signature.
+    Pass the same gen_time used in build_mbr_from_bsm so both timestamps match.
+    Defaults to the current time if not provided.
     """
+    if gen_time is None:
+        gen_time = tai64_now()
     tbs_dict = {
         "payload": {
             "data": {
@@ -136,7 +144,7 @@ def build_signed_1609(mbr_bytes: bytes, signing_key,
                 "content": {"unsecuredData": mbr_bytes.hex().upper()},
             }
         },
-        "headerInfo": {"psid": psid},
+        "headerInfo": {"psid": psid, "generationTime": gen_time},
     }
 
     tbs_coer = encode_jer("ToBeSignedData", tbs_dict)
