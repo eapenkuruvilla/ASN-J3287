@@ -263,6 +263,36 @@ ASN1/
 └── requirements.txt        Python dependencies
 ```
 
+## IEEE 1609.2-2022 Conformance
+
+Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is fully conformant. The encrypted path (`out_ste.coer`) has two known deviations, both blocked on integrating the MA certificate.
+
+### Conformant
+
+| Item | Standard ref |
+|------|-------------|
+| Signing hash: `SHA256(SHA256(tbsData) ‖ SHA256(cert))` | §5.3.1.2.2 |
+| Data input = COER(ToBeSignedData) | §6.3.6 |
+| PSID encoding for values < 128 (PSIDs 32 and 38) | §6.3.10 |
+| Time32/Time64 TAI epoch + 37 leap-second offset | §6.3.11 |
+| HashedId8 = `SHA256(cert)[-8:]` | §6.3.33 |
+| EcdsaP256Signature: r as `x-only` (CHOICE index 0), s as 32-byte OCTET STRING | §6.3.38 |
+| Compressed-point CHOICE indices 2 / 3 (`compressed-y-0` / `compressed-y-1`) | §6.3.23 |
+| ECIES KDF2 output split: K\_enc = 16 B, K\_mac = 32 B (48 B total) | §5.3.5.1(c/d) |
+| AES-128-CCM: tag = 16 B, nonce = 12 B, no AAD | §5.3.8 |
+| SignedData field order (hashId, tbsData, signer, signature) | §6.3.4 |
+| SignerIdentifier = `certificate` (CHOICE index 1) | §6.3.31 |
+| RecipientInfo = `certRecipInfo` (CHOICE index 2) | §6.3.42 |
+
+### Known Issues
+
+| # | Issue | Severity | Affected output |
+|---|-------|----------|----------------|
+| 1 | **ECIES P1 = `b""` instead of `SHA256(COER(recipient cert))`** — KDF2 produces wrong keys; a standard-compliant receiver cannot decrypt. Fix together with Issue 4 when MA cert is integrated. | High | `out_ste.coer` |
+| 2 | **ECIES MAC covers `V ‖ C` (DHAES) instead of `C` only (non-DHAES)** — §5.3.5.1(e) requires non-DHAES mode. The deployed SCMS/CAMP reference implementation also uses `V ‖ C`, so interoperability with ISS infrastructure is unaffected in practice. | Moderate | `out_ste.coer` |
+| 3 | **PSID encoding wrong for values ≥ 128** — `enc_integer_var` uses signed two's-complement (adds a leading `0x00`); COER requires unsigned encoding. No impact today because PSIDs 32 and 38 are both < 128. | Low | any PSID ≥ 128 |
+| 4 | **`recipientId` = `bytes(8)` (8 zero bytes)** — should be `SHA256(COER(recipient cert))[-8:]`. A recipient uses this to select the correct decryption key. Fix together with Issue 1 when MA cert is integrated. | Known placeholder | `out_ste.coer` |
+
 ## Key Standards
 
 | Standard | Scope |
