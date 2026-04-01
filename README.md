@@ -6,7 +6,7 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 
 | Tool | Purpose |
 |------|---------|
-| Python 3.8+ | `create_mbr.py`, `decode_mbr.py`, `decode_j2735.py` |
+| Python 3.8+ | `create_mbr.py`, `encode_mbr.py`, `decode_mbr.py`, `asn1c_lib.py`, `decode_j2735.py` |
 | `cryptography` (pip) | ECDSA signing, AES-CCM encryption |
 | `requests` (pip) | IP geolocation for default lat/lon |
 | `pycrate` (pip) | J2735 UPER decoding (`decode_j2735.py`) |
@@ -107,7 +107,7 @@ For RSUs, `downloadFiles/<HashedId8>.cert` and `downloadFiles/<HashedId8>.s` are
 
 **Implicit certificates:** The ISS SCMS issues **implicit certificates** (ECQV — Elliptic Curve Qu-Vanstone) for North American V2X per IEEE 1609.2. Unlike explicit certificates which carry a public key and CA signature as separate fields, an implicit cert superimposes them into a single reconstruction value — resulting in the compact 79–80 byte size seen here. The receiver reconstructs the sender's public key from the cert and implicitly verifies it in one step. Butterfly Key Expansion (used to batch-provision OBU pseudonym pools) is not applicable to RSU application certs since RSU privacy is not a concern. See [All You Need to Know About V2X PKI Certificates](https://autocrypt.io/v2x-pki-certificates-butterfly-key-expansion-implicit-certificates/) for background.
 
-`create_mbr.py` uses the `downloadFiles/` cert and key via `--cert` and `--signing-key`.
+`create_mbr.py` uses the `downloadFiles/` cert and key via `--certs-dir`.
 
 ### Obtaining the MA Certificate from an RA (IEEE 1609.2.1 §6.3.5.13)
 
@@ -274,18 +274,18 @@ python3 decode_mbr.py coer/jason_mbr.coer --type SaeJ3287Mbr
 │  compile_asn1.sh                                     │
 │    → runs asn1c -fcompound-names on asn/J3287_ASN_flat/ │
 │    → post-processes IOC CLASS alias issues           │
-│    → installs stubs/*.{h,c} into c_code/             │
+│    → installs stubs/*.{h,c} into asn1c_code/             │
 │         │                                            │
-│  c_code/   (~380 generated .c/.h files)              │
+│  asn1c_code/   (~380 generated .c/.h files)              │
 └──────────────────────────────────────────────────────┘
          │
          ▼
 ┌──────────────────────────────────────────────────────┐
 │  3. LIBRARY COMPILATION  ./build_asn_lib.sh          │
 │                                                      │
-│    → scans c_code/*.h for asn_TYPE_descriptor_t      │
-│    → generates c_code/pdu_table.c (PDU dispatch)     │
-│    → gcc -shared -fPIC c_code/*.c                    │
+│    → scans asn1c_code/*.h for asn_TYPE_descriptor_t      │
+│    → generates asn1c_code/pdu_table.c (PDU dispatch)     │
+│    → gcc -shared -fPIC asn1c_code/*.c                    │
 │         │                                            │
 │  lib/libdecode.so                                    │
 └──────────────────────────────────────────────────────┘
@@ -321,8 +321,8 @@ ASN1/
 │   ├── J3287_ASN_flat/     Flattened schemas (output of translate_asn1.py)
 │   ├── J2735ASN_202409/    J2735 schemas (used by decode_j2735.py)
 │   └── ieee1609.2/         IEEE 1609.2 schemas
-├── c_code/                 Generated C code (populated by compile_asn1.sh)
-├── stubs/                  Handwritten C files copied into c_code/ by compile_asn1.sh:
+├── asn1c_code/                 Generated C code (populated by compile_asn1.sh)
+├── stubs/                  Handwritten C files copied into asn1c_code/ by compile_asn1.sh:
 │                             C-2ENT.{h,c}      — ANY replacement for IOC CLASS open types
 │                             decode_shim.{h,c} — OER→JER decoder entry point for libdecode.so
 ├── lib/                    libdecode.so (compiled by build_asn_lib.sh)
@@ -338,13 +338,15 @@ ASN1/
 │   ├── pseudonym/          OBU pseudonym certificates (not used by this toolkit)
 │   └── iss_ma_public_key.cert  ISS MA certificate (recipient key for encrypted MBRs)
 ├── coer/                   Sample COER files and decoded JSON outputs
-├── create_mbr.py           MBR encoder
-├── decode_mbr.py           MBR decoder
+├── asn1c_lib.py            ctypes interface to lib/libdecode.so (decode_oer / encode_jer)
+├── encode_mbr.py           MBR/1609.2 message construction (build_mbr_from_bsm, build_signed_1609, build_encrypted_1609)
+├── decode_mbr.py           MBR decoder — enrichment helpers + CLI
+├── create_mbr.py           CLI entry point — cert selection, geolocation, main()
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── encode_cert_json.py     MA certificate JSON → COER encoder (derives P1, HashedId8, --recipient-pub)
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
-├── build_asn_lib.sh        Compile c_code/ → lib/libdecode.so
-├── compile_asn1.sh         Run asn1c on asn/J3287_ASN_flat/ → c_code/
+├── build_asn_lib.sh        Compile asn1c_code/ → lib/libdecode.so
+├── compile_asn1.sh         Run asn1c on asn/J3287_ASN_flat/ → asn1c_code/
 └── requirements.txt        Python dependencies
 ```
 
@@ -364,6 +366,7 @@ Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is f
 | EcdsaP256Signature: r as `x-only` (CHOICE index 0), s as 32-byte OCTET STRING | §6.3.38 |
 | Compressed-point CHOICE indices 2 / 3 (`compressed-y-0` / `compressed-y-1`) | §6.3.23 |
 | ECIES KDF2 output split: K\_enc = 16 B, K\_mac = 32 B (48 B total) | §5.3.5.1(c/d) |
+| ECIES MAC = `HMAC-SHA256(K_mac, c)[0:16]` (non-DHAES: MAC over `c` only, not `V ‖ c`) | §5.3.5.1(e) |
 | AES-128-CCM: tag = 16 B, nonce = 12 B, no AAD | §5.3.8 |
 | SignedData field order (hashId, tbsData, signer, signature) | §6.3.4 |
 | SignerIdentifier = `certificate` (CHOICE index 1) | §6.3.31 |
@@ -373,10 +376,8 @@ Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is f
 
 | # | Issue | Severity | Affected output |
 |---|-------|----------|----------------|
-| 1 | **ECIES P1 = `b""` instead of `SHA256(COER(recipient cert))`** — KDF2 produces wrong keys; a standard-compliant receiver cannot decrypt. Fix together with Issue 4 when MA cert is integrated. | High | `out_ste.coer` |
-| 2 | **ECIES MAC covers `V ‖ C` (DHAES) instead of `C` only (non-DHAES)** — §5.3.5.1(e) requires non-DHAES mode. The deployed SCMS/CAMP reference implementation also uses `V ‖ C`, so interoperability with ISS infrastructure is unaffected in practice. | Moderate | `out_ste.coer` |
-| 3 | **PSID encoding wrong for values ≥ 128** — `enc_integer_var` uses signed two's-complement (adds a leading `0x00`); COER requires unsigned encoding. No impact today because PSIDs 32 and 38 are both < 128. | Low | any PSID ≥ 128 |
-| 4 | **`recipientId` = `bytes(8)` (8 zero bytes)** — should be `SHA256(COER(recipient cert))[-8:]`. A recipient uses this to select the correct decryption key. Fix together with Issue 1 when MA cert is integrated. | Known placeholder | `out_ste.coer` |
+| 1 | **ECIES P1 = `b""` instead of `SHA256(COER(recipient cert))`** — KDF2 produces wrong keys; a standard-compliant receiver cannot decrypt. Fix together with Issue 2 when MA cert is integrated. | High | `out_ste.coer` |
+| 2 | **`recipientId` = `bytes(8)` (8 zero bytes)** — should be `SHA256(COER(recipient cert))[-8:]`. A recipient uses this to select the correct decryption key. Fix together with Issue 1 when MA cert is integrated. | Known placeholder | `out_ste.coer` |
 
 ## Key Standards
 

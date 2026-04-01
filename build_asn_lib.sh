@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# build_asn_lib.sh — compile c_code/ into lib/libdecode.so
+# build_asn_lib.sh — compile asn1c_code/ into lib/libdecode.so
 #
 # Usage:  ./build_asn_lib.sh
 #
 # Steps:
-#   1. Scan c_code/*.h for asn_TYPE_descriptor_t declarations.
-#   2. Auto-generate c_code/pdu_table.c with the full PDU dispatch table.
-#   3. Compile all c_code/*.c + skeletons into lib/libdecode.so.
+#   1. Scan asn1c_code/*.h for asn_TYPE_descriptor_t declarations.
+#   2. Auto-generate asn1c_code/pdu_table.c with the full PDU dispatch table.
+#   3. Compile all asn1c_code/*.c + skeletons into lib/libdecode.so.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-C_CODE="$SCRIPT_DIR/c_code"
+C_CODE="$SCRIPT_DIR/asn1c_code"
 LIB_DIR="$SCRIPT_DIR/lib"
 SKELETONS="$SCRIPT_DIR/../asn1c/skeletons"
 PDU_TABLE="$C_CODE/pdu_table.c"
@@ -20,7 +20,7 @@ OUT="$LIB_DIR/libdecode.so"
 mkdir -p "$LIB_DIR"
 
 # ── Step 1: collect PDU names ────────────────────────────────────────────────
-echo "==> Scanning c_code/ for PDU types..."
+echo "==> Scanning asn1c_code/ for PDU types..."
 
 # Extract C identifier names from lines like:
 #   extern asn_TYPE_descriptor_t asn_DEF_Foo_Bar;
