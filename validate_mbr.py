@@ -15,7 +15,7 @@ Arguments:
     --api-key   x-virtual-api-key token for the ISS virtual device.
                 The virtual device must have PSID 38 (MBR) in its enrollment.
 
-    --url       ISS DMS base URL (default: https://portal.dm.preprod.v2x.isscms.com)
+    --url       ISS DMS base URL (default: https://api.dm.preprod.v2x.isscms.com)
 
 The script posts the Ieee1609Dot2Data to POST /virtual-device/validate and prints
 the validation status.  On failure it prints all available diagnostic information
@@ -49,6 +49,9 @@ def extract_ieee1609_bytes(raw: bytes) -> bytes:
     SaeJ3287Data starts with version byte 0x01.  In that case decode the
     outer wrapper and re-encode content.signed as Ieee1609Dot2Data bytes.
     """
+    if not raw:
+        print("ERROR: input file is empty.", file=sys.stderr)
+        sys.exit(1)
     if raw[0] == 0x01:
         outer = decode_oer("SaeJ3287Data", raw)
         content = outer.get("content", {})

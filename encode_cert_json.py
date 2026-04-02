@@ -20,8 +20,8 @@ Supports the explicit-certificate subset present in MA certificates:
   signature       ecdsaNistP256Signature
 
 Usage:
-    python3 encode_cert_json.py certs/aesol_ma_bublic_key.json
-    python3 encode_cert_json.py certs/aesol_ma_bublic_key.json --out certs/saesol_ma_public_key.cert
+    python3 encode_cert_json.py certs/saesol_ma_bublic_key.json
+    python3 encode_cert_json.py certs/saesol_ma_bublic_key.json --out certs/saesol_ma_public_key.cert
 """
 
 import argparse

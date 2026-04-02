@@ -35,8 +35,8 @@ except ImportError:
 
 def tai64_now() -> int:
     """Current time as Time64: TAI microseconds since 2004-01-01 00:00:00 UTC.
-    +37 accounts for leap seconds accumulated through 2017-01-01.
-    Update this offset when the next leap second is announced.
+    +37 accounts for leap seconds accumulated through 2016-12-31 (last known leap second).
+    No new leap seconds have been announced as of 2026. Update if one is added.
     """
     epoch = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
     delta = datetime.datetime.now(tz=datetime.timezone.utc) - epoch
@@ -174,16 +174,30 @@ def build_signed_1609(mbr_bytes: bytes, signing_key,
 # ── ECIES-P256 + AES-128-CCM encryption ──────────────────────────────────────
 
 def build_encrypted_1609(signed_1609_bytes: bytes,
-                          recipient_pub_uncompressed: bytes) -> bytes:
+                          recipient_pub_uncompressed: bytes,
+                          recipient_cert_bytes: bytes = None) -> bytes:
     """Build Ieee1609Dot2Data { encryptedData } wrapping signed_1609_bytes.
 
     IEEE 1609.2 §5.3.5 ECIES-P256:
       1. AES-128-CCM encrypt the payload with a random CEK and nonce.
       2. Generate ephemeral P-256 key; ECDH → shared secret Z.
-      3. KDF2(Z) → K_enc (16 bytes) || K_mac (32 bytes).
+      3. KDF2(Z, P1) → K_enc (16 bytes) || K_mac (32 bytes).
+         P1 = SHA-256(COER(recipient_cert))  per §5.3.5.1 certRecipInfo.
       4. c = K_enc ⊕ CEK  (encrypted CEK).
       5. t = HMAC-SHA256(K_mac, c)[0:16]  (MAC over c only, per §5.3.5.1).
+
+    recipient_cert_bytes: raw COER bytes of the recipient's certificate.
+      Used to compute recipientId (HashedId8 = SHA-256(cert)[-8:]) and P1.
+      If None, recipientId is set to 8 zero bytes and P1 = b'' (non-compliant).
     """
+    if recipient_cert_bytes is not None:
+        cert_hash = hashlib.sha256(recipient_cert_bytes).digest()
+        recip_id  = cert_hash[-8:]
+        p1        = cert_hash
+    else:
+        recip_id = bytes(8)
+        p1       = b''
+
     cek   = secrets.token_bytes(16)
     nonce = secrets.token_bytes(12)
     ct_with_tag = AESCCM(cek, tag_length=16).encrypt(nonce, signed_1609_bytes, None)
@@ -195,7 +209,7 @@ def build_encrypted_1609(signed_1609_bytes: bytes,
     )
     Z = eph_key.exchange(ECDH(), recip_pub)
 
-    K            = _x963_kdf(Z, 48)
+    K            = _x963_kdf(Z, 48, p1)
     K_enc, K_mac = K[:16], K[16:48]
     c = bytes(a ^ b for a, b in zip(cek, K_enc))
     t = _hmac.new(K_mac, c, hashlib.sha256).digest()[:16]
@@ -204,9 +218,6 @@ def build_encrypted_1609(signed_1609_bytes: bytes,
                                     serialization.PublicFormat.CompressedPoint)
     v_dict = ({"compressed-y-0": eph_raw[1:].hex().upper()} if eph_raw[0] == 0x02
               else {"compressed-y-1": eph_raw[1:].hex().upper()})
-
-    # recipientId = SHA-256(COER(MA cert))[-8:]; placeholder zeros until cert integrated
-    recip_id = bytes(8)
 
     return encode_jer("Ieee1609Dot2Data", {
         "protocolVersion": 3,

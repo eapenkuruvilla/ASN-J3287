@@ -36,8 +36,11 @@ python3 create_mbr.py \
                                     #   uses local ECQV key reconstruction for signing
     [--sign-api-key <token>]        # ISS virtual-device x-virtual-api-key token
                                     #   signs via ISS API — mutually exclusive with --certs-dir
-    [--sign-api-url <url>]          # ISS DMS base URL (default: https://api.dm.preprod.v2x.isscms.com)
-    [--recipient-pub <hex>]         # Recipient P-256 public key (64–65 bytes hex) — enables out_ste.coer
+    [--sign-api-url <url>]          # ISS DMS base URL for signing and API-based encryption (default: https://api.dm.preprod.v2x.isscms.com)
+    [--recipient-cert <file>]       # Recipient MA cert file (COER) — enables out_ste.coer (certRecipInfo, preferred)
+    [--recipient-pub <hex>]         # Recipient P-256 public key (64–65 bytes hex) — enables out_ste.coer (no cert → non-compliant P1/recipientId)
+    [--encrypt-api-key <token>]     # ISS virtual-device token for API-based encryption (rekRecipInfo)
+    [--encrypt-recipient-id <id>]   #   Device ID to encrypt to (required with --encrypt-api-key)
     [--out-dir coer/]               # Output directory (default: coer/)
     [--psid 38]                     # PSID for headerInfo (default: 38 = MBR)
     [--lat <int>]                   # observationLocation latitude in 1e-7 deg units (default: IP geolocation)
@@ -51,7 +54,7 @@ python3 create_mbr.py \
 |------|------|---------|
 | `out_plaintext.coer` | `SaeJ3287Data { version=1, content: plaintext(SaeJ3287Mbr) }` | always |
 | `out_signed.coer` | `SaeJ3287Data { version=1, content: signed(Ieee1609Dot2Data) }` | `--certs-dir` or `--sign-api-key` |
-| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + `--recipient-pub` |
+| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + (`--recipient-cert` or `--recipient-pub`) |
 
 **Example — plaintext only:**
 
@@ -198,13 +201,23 @@ P1 (SHA256 cert): F661E160F3BA781A610C1692DDB1E6DA0C0CED43CB75EE63CE248AFFB5F88A
 --recipient-pub:  03E2C31B52D6D83F7CE1F74336B68C545BB7ED8527D8D4ED267F3D3659694F7AD3
 ```
 
-Use `--recipient-pub` value to produce a signed+encrypted MBR:
+Use `--recipient-cert` to produce a standard-compliant signed+encrypted MBR (preferred):
 
 ```bash
 python3 create_mbr.py \
     --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
-    --certs-dir certs/e0c324c643aca860 \
-    --recipient-pub 03E2C31B52D6D83F7CE1F74336B68C545BB7ED8527D8D4ED267F3D3659694F7AD3 \
+    --sign-api-key "<x-virtual-api-key token>" \
+    --recipient-cert certs/saesol_ma_public_key.cert \
+    --out-dir coer/
+```
+
+Or with the ISS MA cert:
+
+```bash
+python3 create_mbr.py \
+    --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
+    --sign-api-key "<x-virtual-api-key token>" \
+    --recipient-cert certs/iss_ma_public_key.cert \
     --out-dir coer/
 ```
 
@@ -242,6 +255,43 @@ On failure the script prints the full API response and a decoded dump of the
 
 ```bash
 python3 validate_mbr.py coer/out_signed.coer --api-key <your-virtual-device-token>
+```
+
+### Decrypt sTE MBR — `decrypt_mbr.py`
+
+Decrypts a signed-then-encrypted MBR via the ISS SCMS virtual device API
+(`POST /virtual-device/decrypt`).  Accepts either a `SaeJ3287Data` file
+(extracts `content.sTE` automatically) or a bare `Ieee1609Dot2Data` file.
+
+> **Recipient type constraint:** `POST /virtual-device/decrypt` requires `rekRecipInfo`
+> recipients.  Messages encrypted to an MA certificate (`certRecipInfo`, produced by
+> `--recipient-cert`) cannot be decrypted via this API — those require the MA's
+> private key.  To produce a `rekRecipInfo`-encrypted file for round-trip testing,
+> use `--encrypt-api-key` + `--encrypt-recipient-id` in `create_mbr.py`.
+
+```bash
+python3 decrypt_mbr.py [file] --api-key <token> [--url <base_url>]
+```
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `file` | `coer/out_ste.coer` | COER file to decrypt |
+| `--api-key` | — | `x-virtual-api-key` token (required); must be the device the message was encrypted to |
+| `--url` | `https://api.dm.preprod.v2x.isscms.com` | ISS DMS API base URL |
+
+**Round-trip test (create + decrypt):**
+
+```bash
+# 1. Create sTE encrypted to the virtual device's own key (rekRecipInfo)
+python3 create_mbr.py \
+    --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
+    --sign-api-key "<token>" \
+    --encrypt-api-key "<token>" \
+    --encrypt-recipient-id "<device-id>" \
+    --out-dir coer/
+
+# 2. Decrypt it back
+python3 decrypt_mbr.py coer/out_ste.coer --api-key "<token>"
 ```
 
 ### Decode J2735 BSM — `decode_j2735.py`
@@ -429,8 +479,7 @@ Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is f
 | # | Issue | Severity | Affected output |
 |---|-------|----------|----------------|
 | 1 | **`--certs-dir` local ECQV signing fails for ISS-provisioned bundles** — `dwnl_sgn.priv` is an HSM slot reference, not a raw P-256 scalar, so the local key reconstruction `d = e × k_seed + r mod n` produces an incorrect key. Use `--sign-api-key` (ISS virtual device API) instead. | High | `out_signed.coer`, `out_ste.coer` |
-| 2 | **ECIES P1 = `b""` instead of `SHA256(COER(recipient cert))`** — KDF2 produces wrong keys; a standard-compliant receiver cannot decrypt. Fix together with Issue 3 when MA cert is integrated. | High | `out_ste.coer` |
-| 3 | **`recipientId` = `bytes(8)` (8 zero bytes)** — should be `SHA256(COER(recipient cert))[-8:]`. A recipient uses this to select the correct decryption key. Fix together with Issue 2 when MA cert is integrated. | Known placeholder | `out_ste.coer` |
+| 2 | **ECIES P1 / recipientId require cert bytes** — when `--recipient-pub` is used without `--recipient-cert`, KDF2 P1 = `b""` and recipientId = 8 zero bytes. Use `--recipient-cert <ma.cert>` to produce standard-compliant output. | Low (use `--recipient-cert`) | `out_ste.coer` |
 
 ## Key Standards
 

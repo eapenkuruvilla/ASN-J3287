@@ -245,6 +245,52 @@ def build_signed_1609_via_api(mbr_bytes: bytes, api_key: str, psid: int,
     return signed_oer
 
 
+def build_encrypted_1609_via_api(signed_1609_bytes: bytes, api_key: str,
+                                  recipient_device_id: str, api_url: str) -> bytes:
+    """Encrypt signed_1609_bytes via the ISS virtual device encrypt API.
+
+    Uses recipient.device_id so the output uses rekRecipInfo — decryptable
+    by POST /virtual-device/decrypt with the same device's api-key.
+
+    The signed payload is wrapped as Ieee1609Dot2Data { unsecuredData } before
+    posting, per the API requirement that `message` is a C-OER Ieee1609Dot2Data.
+    The API returns Ieee1609Dot2Data { encryptedData } OER bytes.
+    """
+    import base64
+    from asn1c_lib import encode_jer
+
+    if _requests is None:
+        raise RuntimeError("'requests' not installed; run: pip install requests")
+
+    # Wrap signed bytes as unsecuredData so the API receives a valid Ieee1609Dot2Data
+    wrapped = encode_jer("Ieee1609Dot2Data", {
+        "protocolVersion": 3,
+        "content": {"unsecuredData": signed_1609_bytes.hex().upper()},
+    })
+
+    url     = api_url.rstrip("/") + "/api/v3/virtual-device/encrypt"
+    payload = {
+        "message":   base64.b64encode(wrapped).decode(),
+        "recipient": {"device_id": recipient_device_id},
+    }
+    headers = {"Content-Type": "application/json", "x-virtual-api-key": api_key}
+
+    print(f"  POST {url}", file=sys.stderr)
+    resp = _requests.post(url, json=payload, headers=headers, timeout=30)
+    try:
+        body = resp.json()
+    except Exception:
+        raise RuntimeError(f"ISS encrypt API non-JSON response (HTTP {resp.status_code}):\n{resp.text}")
+    if resp.status_code != 200:
+        raise RuntimeError(f"ISS encrypt API HTTP {resp.status_code}: {body}")
+    if "encryptedData" not in body:
+        raise RuntimeError(f"ISS encrypt API missing 'encryptedData': {body}")
+
+    enc_oer = base64.b64decode(body["encryptedData"])
+    print(f"  ISS encrypted payload: {len(enc_oer)} bytes (rekRecipInfo)", file=sys.stderr)
+    return enc_oer
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -258,10 +304,22 @@ def main():
                    help="ISS virtual-device x-virtual-api-key token; "
                         "when supplied the ISS sign API is used instead of local ECQV signing")
     p.add_argument("--sign-api-url", default="https://api.dm.preprod.v2x.isscms.com",
-                   help="ISS DMS base URL for signing (default: https://api.dm.preprod.v2x.isscms.com)")
+                   help="ISS DMS base URL for signing and API-based encryption "
+                        "(default: https://api.dm.preprod.v2x.isscms.com)")
+    p.add_argument("--recipient-cert",
+                   help="Recipient MA certificate file (raw COER/DER); "
+                        "derives the public key, recipientId (HashedId8), and KDF2 P1 — "
+                        "use this instead of --recipient-pub for standard-compliant encryption")
     p.add_argument("--recipient-pub",
                    help="Recipient P-256 public key, hex-encoded uncompressed "
-                        "(64 or 65 bytes); omit to skip sTE variant")
+                        "(64 or 65 bytes); use --recipient-cert instead when the cert is available")
+    p.add_argument("--encrypt-api-key",
+                   help="ISS virtual-device x-virtual-api-key token for API-based encryption; "
+                        "encrypts to the virtual device's own key (rekRecipInfo) — "
+                        "decryptable via decrypt_mbr.py with the same token")
+    p.add_argument("--encrypt-recipient-id",
+                   help="Device ID to encrypt to when using --encrypt-api-key; "
+                        "defaults to the device identified by the api-key itself")
     p.add_argument("--bsm", required=True,
                    help="Input BSM / SaeJ3287Mbr COER file")
     p.add_argument("--out-dir", default="coer",
@@ -296,7 +354,47 @@ def main():
     else:
         signing_key = None
         cert_bytes_selected = None
-    recipient_pub = load_recipient_pub(args.recipient_pub) if args.recipient_pub else None
+    if args.recipient_cert and args.recipient_pub:
+        print("ERROR: --recipient-cert and --recipient-pub are mutually exclusive.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    recipient_cert_bytes = None
+    recipient_pub = None
+    if args.recipient_cert:
+        with open(args.recipient_cert, 'rb') as fh:
+            recipient_cert_bytes = fh.read()
+        # Extract the ECIES encryption public key from the cert.
+        # MA certs carry it in toBeSigned.encryptionKey.publicKey.eciesNistP256
+        # (a BasePublicEncryptionKey CHOICE, index 0).
+        cert_dict = decode_oer("Certificate", recipient_cert_bytes)
+        try:
+            ek = cert_dict["toBeSigned"]["encryptionKey"]["publicKey"]["eciesNistP256"]
+            if "compressed-y-0" in ek:
+                raw = bytes.fromhex("02" + ek["compressed-y-0"])
+            elif "compressed-y-1" in ek:
+                raw = bytes.fromhex("03" + ek["compressed-y-1"])
+            elif "uncompressedP256" in ek:
+                raw = bytes.fromhex("04" + ek["uncompressedP256"]["x"] + ek["uncompressedP256"]["y"])
+            else:
+                raise ValueError(f"Unsupported eciesNistP256 format: {list(ek.keys())}")
+            pub_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw)
+            recipient_pub = pub_key.public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+        except Exception as exc:
+            print(f"ERROR: could not extract encryption key from {args.recipient_cert}: {exc}",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"  Recipient cert: {args.recipient_cert} "
+              f"(id: {hashlib.sha256(recipient_cert_bytes).digest()[-8:].hex().upper()})",
+              file=sys.stderr)
+    elif args.recipient_pub:
+        recipient_pub = load_recipient_pub(args.recipient_pub)
+        print("  WARNING: --recipient-pub used without --recipient-cert; "
+              "recipientId and KDF2 P1 will be zero/empty (non-compliant).",
+              file=sys.stderr)
     with open(args.bsm, 'rb') as f:
         bsm_bytes = f.read()
 
@@ -345,12 +443,23 @@ def main():
         }),
     )
 
-    if recipient_pub is None:
-        print("  (skipping sTE variant: no --recipient-pub provided)", file=sys.stderr)
+    if recipient_pub is None and not args.encrypt_api_key:
+        print("  (skipping sTE variant: no --recipient-cert/--recipient-pub "
+              "or --encrypt-api-key provided)", file=sys.stderr)
         return
 
     # sTE: SaeJ3287Data { version=1, content { sTE: Ieee1609Dot2Data { encryptedData } } }
-    ste_1609 = build_encrypted_1609(signed_1609, recipient_pub)
+    if args.encrypt_api_key:
+        if not args.encrypt_recipient_id:
+            print("ERROR: --encrypt-recipient-id is required with --encrypt-api-key.",
+                  file=sys.stderr)
+            sys.exit(1)
+        # API path: rekRecipInfo — encrypted to virtual device's own key
+        ste_1609 = build_encrypted_1609_via_api(
+            signed_1609, args.encrypt_api_key, args.encrypt_recipient_id, args.sign_api_url)
+    else:
+        # Local path: certRecipInfo — encrypted to MA certificate
+        ste_1609 = build_encrypted_1609(signed_1609, recipient_pub, recipient_cert_bytes)
     write_file(
         os.path.join(args.out_dir, "out_ste.coer"),
         encode_jer("SaeJ3287Data", {
