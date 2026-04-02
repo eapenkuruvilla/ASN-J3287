@@ -32,7 +32,11 @@ Builds a `SaeJ3287Data` COER file from an input BSM. Always produces `out_plaint
 python3 create_mbr.py \
     --bsm <file.coer>               # Input Ieee1609Dot2Data BSM (required)
     [--certs-dir <path>]            # SCMS org cert store (e.g. certs/e0c324c643aca860)
-                                    #   auto-selects valid rsu-*/downloadFiles/ cert — enables out_signed.coer
+                                    #   auto-selects valid rsu-*/downloadFiles/ cert
+                                    #   uses local ECQV key reconstruction for signing
+    [--sign-api-key <token>]        # ISS virtual-device x-virtual-api-key token
+                                    #   signs via ISS API — mutually exclusive with --certs-dir
+    [--sign-api-url <url>]          # ISS DMS base URL (default: https://api.dm.preprod.v2x.isscms.com)
     [--recipient-pub <hex>]         # Recipient P-256 public key (64–65 bytes hex) — enables out_ste.coer
     [--out-dir coer/]               # Output directory (default: coer/)
     [--psid 38]                     # PSID for headerInfo (default: 38 = MBR)
@@ -46,8 +50,8 @@ python3 create_mbr.py \
 | File | Type | Requires |
 |------|------|---------|
 | `out_plaintext.coer` | `SaeJ3287Data { version=1, content: plaintext(SaeJ3287Mbr) }` | always |
-| `out_signed.coer` | `SaeJ3287Data { version=1, content: signed(Ieee1609Dot2Data) }` | `--certs-dir` |
-| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | `--certs-dir` + `--recipient-pub` |
+| `out_signed.coer` | `SaeJ3287Data { version=1, content: signed(Ieee1609Dot2Data) }` | `--certs-dir` or `--sign-api-key` |
+| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + `--recipient-pub` |
 
 **Example — plaintext only:**
 
@@ -57,7 +61,16 @@ python3 create_mbr.py \
     --out-dir coer/
 ```
 
-**Example — signed with RSU application certificate:**
+**Example — signed via ISS virtual device API (recommended):**
+
+```bash
+python3 create_mbr.py \
+    --bsm coer/Ieee1609Dot2Data_bad_accel.coer \
+    --sign-api-key "<x-virtual-api-key token>" \
+    --out-dir coer/
+```
+
+**Example — signed with local ECQV key reconstruction:**
 
 ```bash
 python3 create_mbr.py \
@@ -80,10 +93,10 @@ All certificates under `certs/` were downloaded from an SCMS provider (ISS) and 
 | `certchain/s` | Private key reconstruction value for the enrollment signing key |
 | `trustedcerts/` | Root of trust: `rca`, `pca`, `ica`, `eca`, `ra` |
 | `enr_sgn.prv` | Enrollment private signing key |
-| `dwnl_sgn.priv` | Seed signing key for application certs (`k_seed` in ECQV reconstruction) |
-| `dwnl_enc.priv` | Seed encryption key for application certs |
+| `dwnl_sgn.priv` | Seed signing key for application certs. **In ISS-provisioned bundles this file holds an HSM slot reference (1-byte algo + 2-byte slot-length field + slot number), not a raw P-256 scalar.** ECQV reconstruction (`k_seed` in `d = e × k_seed + r mod n`) therefore cannot be performed locally — HSM access is required. |
+| `dwnl_enc.priv` | Seed encryption key for application certs (also an HSM reference in ISS-provisioned bundles). |
 | `downloadFiles/<HashedId8>.cert` | Operational application certificate for the RSU (implicit / ECQV) |
-| `downloadFiles/<HashedId8>.s` | Private key reconstruction value `r`; actual key = `(r + k_seed) mod n` where `k_seed` = `dwnl_sgn.priv` |
+| `downloadFiles/<HashedId8>.s` | Private key reconstruction value `r` (raw 32-byte big-endian scalar). Final signing key = `(e × k_seed + r) mod n` where `e = SHA-256(COER(cert.toBeSigned))` and `k_seed` comes from HSM (referenced by `dwnl_sgn.priv`). Cannot be reconstructed locally without HSM access. |
 | `iss_ma_public_key.cert` | ISS pre-production MA (Misbehavior Authority) certificate (`ma.preprod.v2x.isscms.com`); contains the recipient public key for `--recipient-pub` when producing signed+encrypted MBRs (`out_ste.coer`). Obtained via `curl "https://ra.preprod.v2x.isscms.com/v3/ma-certificate?psid=20"` |
 
 **Certificate structure**
@@ -93,7 +106,7 @@ The `<OrgId>` directory (`e0c324c643aca860`) is the HashedId8 of the organisatio
 Chain of trust (bottom → top):
 
 ```
-downloadFiles/<HashedId8>.s     32-byte raw P-256 private key scalar
+downloadFiles/<HashedId8>.s     32-byte private key reconstruction value r (NOT the final key)
 downloadFiles/<HashedId8>.cert  Authorization Ticket (AT / application cert, 80 bytes)
                                     signed by ↓
 certchain/1                     PCA certificate
@@ -104,6 +117,8 @@ trustedcerts/rca                Root CA (offline trust anchor)
 ```
 
 For RSUs, `downloadFiles/<HashedId8>.cert` and `downloadFiles/<HashedId8>.s` are the operational signing credentials — the `certchain/` contents are a packaging artifact of the SCMS download format and are not used. RSUs do not rotate certificates (rotation applies to OBUs only).
+
+> **Note — local signing not functional for ISS-provisioned bundles:** The `--certs-dir` path calls `dwnl_sgn.priv` as `k_seed` in ECQV reconstruction. Per the ISS SCMS DMS Master Guide, `dwnl_sgn.priv` in production bundles is an HSM slot reference, not a raw P-256 scalar. Attempting local reconstruction will produce an incorrect private key and an invalid signature. Use `--sign-api-key` (ISS virtual device sign API) instead.
 
 **Implicit certificates:** The ISS SCMS issues **implicit certificates** (ECQV — Elliptic Curve Qu-Vanstone) for North American V2X per IEEE 1609.2. Unlike explicit certificates which carry a public key and CA signature as separate fields, an implicit cert superimposes them into a single reconstruction value — resulting in the compact 79–80 byte size seen here. The receiver reconstructs the sender's public key from the cert and implicitly verifies it in one step. Butterfly Key Expansion (used to batch-provision OBU pseudonym pools) is not applicable to RSU application certs since RSU privacy is not a concern. See [All You Need to Know About V2X PKI Certificates](https://autocrypt.io/v2x-pki-certificates-butterfly-key-expansion-implicit-certificates/) for background.
 
@@ -191,6 +206,42 @@ python3 create_mbr.py \
     --certs-dir certs/e0c324c643aca860 \
     --recipient-pub 03E2C31B52D6D83F7CE1F74336B68C545BB7ED8527D8D4ED267F3D3659694F7AD3 \
     --out-dir coer/
+```
+
+### Validate Signed MBR — `validate_mbr.py`
+
+Validates a signed MBR against the ISS SCMS virtual device API
+(`POST /virtual-device/validate`).  Accepts either a `SaeJ3287Data` file
+(extracts the inner `Ieee1609Dot2Data` automatically) or a bare
+`Ieee1609Dot2Data` file.
+
+```bash
+python3 validate_mbr.py [file] --api-key <token> [--url <base_url>]
+```
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `file` | `coer/out_signed.coer` | COER file to validate |
+| `--api-key` | — | `x-virtual-api-key` token (required); virtual device must have PSID 38 in its enrollment |
+| `--url` | `https://api.dm.preprod.v2x.isscms.com` | ISS DMS API base URL |
+
+**Validation status values:**
+
+| Status | Meaning |
+|--------|---------|
+| `valid` / `success` | Signature verified; certificate chain recognized by ISS SCMS |
+| `failure` | Cryptographic verification failed — signature does not match cert |
+| `not_signed` | Message not recognized as a signed `Ieee1609Dot2Data` |
+| `unrecognized_issuer` | Signer cert chain not known to ISS SCMS |
+| `unknown_cert` | Digest signer used but digest unknown to ISS |
+
+On failure the script prints the full API response and a decoded dump of the
+`Ieee1609Dot2Data` that was sent, to aid troubleshooting.
+
+**Example:**
+
+```bash
+python3 validate_mbr.py coer/out_signed.coer --api-key <your-virtual-device-token>
 ```
 
 ### Decode J2735 BSM — `decode_j2735.py`
@@ -342,6 +393,7 @@ ASN1/
 ├── encode_mbr.py           MBR/1609.2 message construction (build_mbr_from_bsm, build_signed_1609, build_encrypted_1609)
 ├── decode_mbr.py           MBR decoder — enrichment helpers + CLI
 ├── create_mbr.py           CLI entry point — cert selection, geolocation, main()
+├── validate_mbr.py         Validate signed MBR via ISS SCMS virtual device API
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── encode_cert_json.py     MA certificate JSON → COER encoder (derives P1, HashedId8, --recipient-pub)
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
@@ -376,8 +428,9 @@ Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is f
 
 | # | Issue | Severity | Affected output |
 |---|-------|----------|----------------|
-| 1 | **ECIES P1 = `b""` instead of `SHA256(COER(recipient cert))`** — KDF2 produces wrong keys; a standard-compliant receiver cannot decrypt. Fix together with Issue 2 when MA cert is integrated. | High | `out_ste.coer` |
-| 2 | **`recipientId` = `bytes(8)` (8 zero bytes)** — should be `SHA256(COER(recipient cert))[-8:]`. A recipient uses this to select the correct decryption key. Fix together with Issue 1 when MA cert is integrated. | Known placeholder | `out_ste.coer` |
+| 1 | **`--certs-dir` local ECQV signing fails for ISS-provisioned bundles** — `dwnl_sgn.priv` is an HSM slot reference, not a raw P-256 scalar, so the local key reconstruction `d = e × k_seed + r mod n` produces an incorrect key. Use `--sign-api-key` (ISS virtual device API) instead. | High | `out_signed.coer`, `out_ste.coer` |
+| 2 | **ECIES P1 = `b""` instead of `SHA256(COER(recipient cert))`** — KDF2 produces wrong keys; a standard-compliant receiver cannot decrypt. Fix together with Issue 3 when MA cert is integrated. | High | `out_ste.coer` |
+| 3 | **`recipientId` = `bytes(8)` (8 zero bytes)** — should be `SHA256(COER(recipient cert))[-8:]`. A recipient uses this to select the correct decryption key. Fix together with Issue 2 when MA cert is integrated. | Known placeholder | `out_ste.coer` |
 
 ## Key Standards
 

@@ -83,14 +83,19 @@ def load_signing_key(path: str):
 
     ISS SCMS issues implicit (ECQV) application certificates per IEEE 1609.2.
     Per the ISS SCMS DMS Master Guide (Guidance Notes / File Structure):
-      - downloadFiles/<hash>.s   : private key reconstruction value  r  (32 bytes)
-      - rsu-N/dwnl_sgn.priv      : seed signing key for application certs  k_seed  (32 bytes)
+      - downloadFiles/<hash>.s     : private key reconstruction value  r  (32 bytes)
+      - downloadFiles/<hash>.cert  : the implicit certificate (same base name)
+      - rsu-N/dwnl_sgn.priv        : seed signing key  k_seed  (32 bytes)
 
-    Actual private key:  d = (r + k_seed) mod n   (P-256 curve order)
+    ECQV key reconstruction (IEEE 1609.2 §5.3.2):
+      e      = SHA-256( COER(cert.toBeSigned) )   as a big-endian integer
+      d      = (e * k_seed + r) mod n             (P-256 curve order)
 
     path is expected to be the .s file inside downloadFiles/.
     Falls back to PEM if path does not point to a 32-byte raw scalar.
     """
+    from asn1c_lib import decode_oer, encode_jer
+
     # P-256 curve order
     _N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
@@ -99,11 +104,19 @@ def load_signing_key(path: str):
 
     if len(data) == 32:
         r = int.from_bytes(data, 'big')
+
         # dwnl_sgn.priv lives one level above downloadFiles/
         seed_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'dwnl_sgn.priv')
         with open(seed_path, 'rb') as f:
             k_seed = int.from_bytes(f.read(), 'big')
-        scalar = (r + k_seed) % _N
+
+        # e = SHA-256( COER(cert) ) — hash of the full raw cert bytes
+        cert_path = path[:-2] + '.cert'
+        with open(cert_path, 'rb') as f:
+            cert_bytes = f.read()
+        e = int.from_bytes(hashlib.sha256(cert_bytes).digest(), 'big')
+
+        scalar = (e * k_seed + r) % _N
         return ec.derive_private_key(scalar, ec.SECP256R1(), default_backend())
 
     return serialization.load_pem_private_key(data, password=None,
@@ -201,6 +214,37 @@ def write_file(path: str, data: bytes) -> None:
     print(f"  {path}  ({len(data)} bytes)", file=sys.stderr)
 
 
+def build_signed_1609_via_api(mbr_bytes: bytes, api_key: str, psid: int,
+                               api_url: str) -> bytes:
+    """Sign mbr_bytes via the ISS virtual device sign API.
+
+    Returns raw OER bytes of Ieee1609Dot2Data { signedData } — same type
+    returned by build_signed_1609() so callers are interchangeable.
+    """
+    import base64
+    if _requests is None:
+        raise RuntimeError("'requests' not installed; run: pip install requests")
+
+    url     = api_url.rstrip("/") + "/api/v3/virtual-device/sign"
+    payload = {"psid": psid, "tbsOer": base64.b64encode(mbr_bytes).decode()}
+    headers = {"Content-Type": "application/json", "x-virtual-api-key": api_key}
+
+    print(f"  POST {url}", file=sys.stderr)
+    resp = _requests.post(url, json=payload, headers=headers, timeout=30)
+    try:
+        body = resp.json()
+    except Exception:
+        raise RuntimeError(f"ISS sign API non-JSON response (HTTP {resp.status_code}):\n{resp.text}")
+    if resp.status_code != 200:
+        raise RuntimeError(f"ISS sign API HTTP {resp.status_code}: {body}")
+    if "signedPayload" not in body:
+        raise RuntimeError(f"ISS sign API missing 'signedPayload': {body}")
+
+    signed_oer = base64.b64decode(body["signedPayload"])
+    print(f"  ISS signed payload: {len(signed_oer)} bytes", file=sys.stderr)
+    return signed_oer
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -209,8 +253,12 @@ def main():
     )
     p.add_argument("--certs-dir",
                    help="SCMS organisation cert store directory (e.g. certs/e0c324c643aca860); "
-                        "the currently valid rsu-*/downloadFiles/ cert is selected automatically; "
-                        "omit to skip signed and sTE variants")
+                        "the currently valid rsu-*/downloadFiles/ cert is selected automatically")
+    p.add_argument("--sign-api-key",
+                   help="ISS virtual-device x-virtual-api-key token; "
+                        "when supplied the ISS sign API is used instead of local ECQV signing")
+    p.add_argument("--sign-api-url", default="https://api.dm.preprod.v2x.isscms.com",
+                   help="ISS DMS base URL for signing (default: https://api.dm.preprod.v2x.isscms.com)")
     p.add_argument("--recipient-pub",
                    help="Recipient P-256 public key, hex-encoded uncompressed "
                         "(64 or 65 bytes); omit to skip sTE variant")
@@ -231,6 +279,11 @@ def main():
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    if args.certs_dir and args.sign_api_key:
+        print("ERROR: --certs-dir and --sign-api-key are mutually exclusive.",
+              file=sys.stderr)
+        sys.exit(1)
 
     if args.certs_dir:
         cert_path, key_path = select_rsu_cert(args.certs_dir)
@@ -269,16 +322,21 @@ def main():
         }),
     )
 
-    if signing_key is None:
-        print("  (skipping signed and sTE variants: no --certs-dir provided)",
+    if signing_key is None and not args.sign_api_key:
+        print("  (skipping signed and sTE variants: no --certs-dir or --sign-api-key provided)",
               file=sys.stderr)
         return
 
-    cert_bytes = cert_bytes_selected
+    # ── Signed variant ───────────────────────────────────────────────────────
+    if args.sign_api_key:
+        signed_1609 = build_signed_1609_via_api(
+            mbr_bytes, args.sign_api_key, args.psid, args.sign_api_url)
+    else:
+        cert_bytes = cert_bytes_selected
+        signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid,
+                                         gen_time=gen_time)
 
     # Signed: SaeJ3287Data { version=1, content { signed: Ieee1609Dot2Data { signedData } } }
-    signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid,
-                                     gen_time=gen_time)
     write_file(
         os.path.join(args.out_dir, "out_signed.coer"),
         encode_jer("SaeJ3287Data", {
