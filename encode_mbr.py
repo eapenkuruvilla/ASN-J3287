@@ -127,17 +127,14 @@ def build_mbr_from_bsm(bsm_bytes: bytes,
 # ── 1609.2 signing ────────────────────────────────────────────────────────────
 
 def build_signed_1609(mbr_bytes: bytes, signing_key,
-                      cert_bytes: bytes, psid: int = 38,
-                      gen_time: int = None) -> bytes:
+                      cert_bytes: bytes, psid: int = 38) -> bytes:
     """Build Ieee1609Dot2Data { signedData } over mbr_bytes.
 
     Two-pass: encode ToBeSignedData first (COER bytes for signing hash),
     then encode the full Ieee1609Dot2Data with the computed signature.
-    Pass the same gen_time used in build_mbr_from_bsm so both timestamps match.
-    Defaults to the current time if not provided.
+    headerInfo contains only psid — generationTime must be ABSENT per
+    SaeJ3287Mbr-Signed constraint (§SaeJ3287 WITH COMPONENTS absence constraint).
     """
-    if gen_time is None:
-        gen_time = tai64_now()
     tbs_dict = {
         "payload": {
             "data": {
@@ -145,7 +142,7 @@ def build_signed_1609(mbr_bytes: bytes, signing_key,
                 "content": {"unsecuredData": mbr_bytes.hex().upper()},
             }
         },
-        "headerInfo": {"psid": psid, "generationTime": gen_time},
+        "headerInfo": {"psid": psid},
     }
 
     tbs_coer = encode_jer("ToBeSignedData", tbs_dict)

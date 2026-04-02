@@ -567,8 +567,7 @@ def main():
             mbr_bytes, args.sign_api_key, args.psid, args.sign_api_url)
     else:
         cert_bytes = cert_bytes_selected
-        signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid,
-                                         gen_time=gen_time)
+        signed_1609 = build_signed_1609(mbr_bytes, signing_key, cert_bytes, args.psid)
 
     # Signed: SaeJ3287Data { version=1, content { signed: Ieee1609Dot2Data { signedData } } }
     write_file(

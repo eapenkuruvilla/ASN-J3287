@@ -198,7 +198,7 @@ def main():
         choices=["SaeJ3287Data", "SaeJ3287Mbr"],
         default="SaeJ3287Data",
         help="Top-level PDU type (default: SaeJ3287Data). "
-             "Use SaeJ3287Mbr for raw MBR files (e.g. jason_mbr.coer).",
+             "Use SaeJ3287Mbr for raw MBR files without the SaeJ3287Data wrapper.",
     )
     args = parser.parse_args()
 
