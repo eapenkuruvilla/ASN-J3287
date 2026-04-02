@@ -6,7 +6,7 @@ Usage:
     python3 create_mbr.py \\
         --bsm <file.coer> \\
         [--sign-api-key <token>]          # ISS virtual-device signing (recommended)
-        [--certs-dir <path>]              # local ECQV signing (HSM required for ISS bundles)
+        [--certs-dir <path>]              # local ECQV signing (RSU or pseudonym bundle)
         [--recipient-cert <ma.cert>]      # certRecipInfo encryption to MA cert
         [--encrypt-api-key <token>        # rekRecipInfo encryption via ISS API
          --encrypt-recipient-id <id>]
@@ -381,7 +381,6 @@ def build_encrypted_1609_via_api(signed_1609_bytes: bytes, api_key: str,
     The API returns Ieee1609Dot2Data { encryptedData } OER bytes.
     """
     import base64
-    from asn1c_lib import encode_jer
 
     if _requests is None:
         raise RuntimeError("'requests' not installed; run: pip install requests")
