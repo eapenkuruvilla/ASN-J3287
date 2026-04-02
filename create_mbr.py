@@ -3,10 +3,13 @@
 create_mbr.py - Build SaeJ3287Data from an input BSM (Ieee1609Dot2Data).
 
 Usage:
-    python create_mbr.py \\
-        --bsm  data/Ieee1609Dot2Data_bad_accel.coer \\
-        [--certs-dir certs/e0c324c643aca860] \\
-        [--recipient-pub <hex_uncompressed_pubkey>] \\
+    python3 create_mbr.py \\
+        --bsm <file.coer> \\
+        [--sign-api-key <token>]          # ISS virtual-device signing (recommended)
+        [--certs-dir <path>]              # local ECQV signing (HSM required for ISS bundles)
+        [--recipient-cert <ma.cert>]      # certRecipInfo encryption to MA cert
+        [--encrypt-api-key <token>        # rekRecipInfo encryption via ISS API
+         --encrypt-recipient-id <id>]
         [--out-dir coer/]
 
 The script reads the BSM, hard-codes a LongAcc-ValueTooLarge observation
@@ -15,18 +18,12 @@ constructs a SaeJ3287Mbr (EtsiTs103759Mbr) that embeds the BSM as
 IEEE 1609.2 V2xPduStream evidence.
 
 Produces:
-    {out_dir}/out_plaintext.coer   -- SaeJ3287MbrSec.plaintext
-    {out_dir}/out_signed.coer      -- SaeJ3287MbrSec.signed (if --certs-dir)
-    {out_dir}/out_ste.coer         -- SaeJ3287MbrSec.sTE    (if --certs-dir + --recipient-pub)
-
-Certs:
-    --certs-dir     Path to the SCMS organisation cert store (e.g. certs/e0c324c643aca860).
-                    The script scans rsu-*/downloadFiles/*.cert under this directory,
-                    selects the currently valid certificate with the earliest expiry,
-                    and uses the corresponding .s key file for signing.
-    --recipient-pub Recipient P-256 public key, hex-encoded, uncompressed
-                    (65 bytes: 04 || x || y, or 64 bytes without the 04 prefix)
-                    (optional)
+    {out_dir}/out_plaintext.coer   -- SaeJ3287Data { plaintext: SaeJ3287Mbr }
+    {out_dir}/out_signed.coer      -- SaeJ3287Data { signed: Ieee1609Dot2Data }
+                                      (requires --sign-api-key or --certs-dir)
+    {out_dir}/out_ste.coer         -- SaeJ3287Data { sTE: Ieee1609Dot2Data }
+                                      (requires signing + --recipient-cert /
+                                       --recipient-pub / --encrypt-api-key)
 """
 
 import argparse
@@ -94,8 +91,6 @@ def load_signing_key(path: str):
     path is expected to be the .s file inside downloadFiles/.
     Falls back to PEM if path does not point to a 32-byte raw scalar.
     """
-    from asn1c_lib import decode_oer, encode_jer
-
     # P-256 curve order
     _N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
@@ -318,8 +313,7 @@ def main():
                         "encrypts to the virtual device's own key (rekRecipInfo) — "
                         "decryptable via decrypt_mbr.py with the same token")
     p.add_argument("--encrypt-recipient-id",
-                   help="Device ID to encrypt to when using --encrypt-api-key; "
-                        "defaults to the device identified by the api-key itself")
+                   help="Device ID to encrypt to (required with --encrypt-api-key)")
     p.add_argument("--bsm", required=True,
                    help="Input BSM / SaeJ3287Mbr COER file")
     p.add_argument("--out-dir", default="coer",
@@ -356,6 +350,11 @@ def main():
         cert_bytes_selected = None
     if args.recipient_cert and args.recipient_pub:
         print("ERROR: --recipient-cert and --recipient-pub are mutually exclusive.",
+              file=sys.stderr)
+        sys.exit(1)
+    if args.encrypt_api_key and (args.recipient_cert or args.recipient_pub):
+        print("ERROR: --encrypt-api-key is mutually exclusive with "
+              "--recipient-cert and --recipient-pub.",
               file=sys.stderr)
         sys.exit(1)
 

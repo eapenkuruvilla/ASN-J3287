@@ -8,7 +8,7 @@ Tools for building and decoding Vehicle-to-Everything (V2X) Misbehavior Reports 
 |------|---------|
 | Python 3.8+ | `create_mbr.py`, `encode_mbr.py`, `decode_mbr.py`, `asn1c_lib.py`, `decode_j2735.py` |
 | `cryptography` (pip) | ECDSA signing, AES-CCM encryption |
-| `requests` (pip) | IP geolocation for default lat/lon |
+| `requests` (pip) | ISS API calls (sign, encrypt, validate, decrypt) and IP geolocation |
 | `pycrate` (pip) | J2735 UPER decoding (`decode_j2735.py`) |
 | `gcc` | Compile `lib/libasn1c.so` |
 | `lib/libasn1c.so` | Required at runtime by `create_mbr.py` and `decode_mbr.py` |
@@ -54,7 +54,7 @@ python3 create_mbr.py \
 |------|------|---------|
 | `out_plaintext.coer` | `SaeJ3287Data { version=1, content: plaintext(SaeJ3287Mbr) }` | always |
 | `out_signed.coer` | `SaeJ3287Data { version=1, content: signed(Ieee1609Dot2Data) }` | `--certs-dir` or `--sign-api-key` |
-| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + (`--recipient-cert` or `--recipient-pub`) |
+| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + (`--recipient-cert` or `--recipient-pub` or `--encrypt-api-key` + `--encrypt-recipient-id`) |
 
 **Example — plaintext only:**
 
@@ -183,8 +183,8 @@ python3 encode_cert_json.py <cert.json> [--out <output.cert>] [--hex]
 
 | Field | Use |
 |-------|-----|
-| `HashedId8` | `recipientId` in `PKRecipientInfo` (Issue 4 fix) |
-| `P1 (SHA256 cert)` | KDF2 P1 parameter for ECIES encryption (Issue 1 fix) |
+| `HashedId8` | `recipientId` in `PKRecipientInfo` |
+| `P1 (SHA256 cert)` | KDF2 P1 parameter for ECIES encryption |
 | `--recipient-pub` | Compressed public key argument for `create_mbr.py` |
 
 **Example:**
@@ -444,6 +444,7 @@ ASN1/
 ├── decode_mbr.py           MBR decoder — enrichment helpers + CLI
 ├── create_mbr.py           CLI entry point — cert selection, geolocation, main()
 ├── validate_mbr.py         Validate signed MBR via ISS SCMS virtual device API
+├── decrypt_mbr.py          Decrypt sTE MBR via ISS SCMS virtual device API
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── encode_cert_json.py     MA certificate JSON → COER encoder (derives P1, HashedId8, --recipient-pub)
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
@@ -454,7 +455,7 @@ ASN1/
 
 ## IEEE 1609.2-2022 Conformance
 
-Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is fully conformant. The encrypted path (`out_ste.coer`) has two known deviations, both blocked on integrating the MA certificate.
+Verified against IEEE Std 1609.2-2022. The signing path (`out_signed.coer`) is fully conformant. The encrypted path (`out_ste.coer`) is conformant when `--recipient-cert` is used; using `--recipient-pub` alone produces non-compliant `recipientId` and KDF2 P1 values.
 
 ### Conformant
 

@@ -5,7 +5,8 @@ encode_mbr.py - Build SaeJ3287 messages encoded via asn1c (libasn1c.so).
 Public API:
     build_mbr_from_bsm(bsm_bytes, lat, lon, elev) -> bytes  SaeJ3287Mbr COER
     build_signed_1609(mbr_bytes, signing_key, cert_bytes, psid) -> bytes
-    build_encrypted_1609(signed_1609_bytes, recipient_pub_uncompressed) -> bytes
+    build_encrypted_1609(signed_1609_bytes, recipient_pub_uncompressed,
+                         recipient_cert_bytes=None) -> bytes
 
 All structural encoding is delegated to encode_jer() / decode_oer() which call
 the asn1c-generated codec in lib/libasn1c.so.
