@@ -45,6 +45,7 @@ from encode_mbr import build_mbr_from_bsm, build_signed_1609, build_encrypted_16
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -75,20 +76,67 @@ def geolocate_ip() -> tuple:
         return 0, 0, 0
 
 
-def load_signing_key(path: str):
+def _expansion_scalar_aes_dm(seed_key: bytes, i: int, j: int, order_n: int) -> int:
+    """AES-ECB butterfly key expansion KDF (SCMS pseudonym cert profile).
+
+    Computes f_k(i, j) mod N for butterfly key expansion:
+        kU = (sk_base + f_k(i, j)) mod N
+
+    Algorithm matches DataSigner.expansion_scalar_aes_dm() in faulty-bsm-generator.
+    """
+    if len(seed_key) not in (16, 24, 32):
+        raise ValueError("seed_key must be 16/24/32 bytes for AES")
+
+    x_int = ((i & 0xFFFFFFFF) << 64) | ((j & 0xFFFFFFFF) << 32)
+    x = x_int.to_bytes(16, "big")
+
+    blocks = []
+    for t in (1, 2, 3):
+        xt = (int.from_bytes(x, "big") + t) & ((1 << 128) - 1)
+        xt_bytes = xt.to_bytes(16, "big")
+        cipher = Cipher(algorithms.AES(seed_key), modes.ECB(), backend=default_backend())
+        enc = cipher.encryptor()
+        ct = enc.update(xt_bytes) + enc.finalize()
+        blocks.append(bytes(a ^ b for a, b in zip(ct, xt_bytes)))
+
+    return int.from_bytes(b"".join(blocks), "big") % order_n
+
+
+def _find_issuer_cert_coer(bundle_dir: str, issuer_hid8: bytes) -> bytes:
+    """Scan trustedcerts/ and certchain/ for the cert whose SHA-256[-8:] matches issuer_hid8."""
+    import pathlib
+    for subdir in ("trustedcerts", "certchain"):
+        root = pathlib.Path(bundle_dir) / subdir
+        if not root.exists():
+            continue
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            b = p.read_bytes()
+            if hashlib.sha256(b).digest()[-8:] == issuer_hid8:
+                return b
+    raise RuntimeError(f"Issuer cert not found for HashedId8={issuer_hid8.hex()}")
+
+
+def load_signing_key(path: str, bundle_dir: str = None):
     """Load the actual P-256 signing key for an ISS SCMS application certificate.
 
     ISS SCMS issues implicit (ECQV) application certificates per IEEE 1609.2.
-    Per the ISS SCMS DMS Master Guide (Guidance Notes / File Structure):
-      - downloadFiles/<hash>.s     : private key reconstruction value  r  (32 bytes)
-      - downloadFiles/<hash>.cert  : the implicit certificate (same base name)
-      - rsu-N/dwnl_sgn.priv        : seed signing key  k_seed  (32 bytes)
 
-    ECQV key reconstruction (IEEE 1609.2 §5.3.2):
-      e      = SHA-256( COER(cert.toBeSigned) )   as a big-endian integer
-      d      = (e * k_seed + r) mod n             (P-256 curve order)
+    For RSU bundles (rsu-N/downloadFiles/<hash>.s):
+      bundle_dir defaults to the rsu-N/ directory (one level above downloadFiles/).
 
-    path is expected to be the .s file inside downloadFiles/.
+    For pseudonym bundles (download/{i}/{i}_{j}.s):
+      bundle_dir must be passed explicitly (the root of the pseudonym bundle).
+      Butterfly expansion is applied when sgn_expnsn.key is present at bundle_dir.
+
+    ECQV key reconstruction (IEEE 1609.2 §5.3.2 / SCMS profile):
+      tbs_coer  = COER(cert.toBeSigned)
+      e         = SHA-256( SHA-256(tbs_coer) || SHA-256(issuer_cert_coer) )  mod n
+      kU        = (sk_base + f_k(i, j))  mod n      [butterfly; else kU = sk_base]
+      dU        = (r + e * kU)  mod n
+
+    path is expected to be the .s file.
     Falls back to PEM if path does not point to a 32-byte raw scalar.
     """
     # P-256 curve order
@@ -100,18 +148,58 @@ def load_signing_key(path: str):
     if len(data) == 32:
         r = int.from_bytes(data, 'big')
 
-        # dwnl_sgn.priv lives one level above downloadFiles/
-        seed_path = os.path.join(os.path.dirname(os.path.dirname(path)), 'dwnl_sgn.priv')
+        # Locate bundle_dir (contains dwnl_sgn.priv, certchain/, trustedcerts/)
+        if bundle_dir is None:
+            # RSU layout: dwnl_sgn.priv lives one level above downloadFiles/
+            bundle_dir = os.path.dirname(os.path.dirname(path))
+        seed_path = os.path.join(bundle_dir, 'dwnl_sgn.priv')
         with open(seed_path, 'rb') as f:
-            k_seed = int.from_bytes(f.read(), 'big')
+            sk_base = int.from_bytes(f.read(), 'big')
 
-        # e = SHA-256( COER(cert) ) — hash of the full raw cert bytes
+        # Load corresponding cert
         cert_path = path[:-2] + '.cert'
         with open(cert_path, 'rb') as f:
             cert_bytes = f.read()
-        e = int.from_bytes(hashlib.sha256(cert_bytes).digest(), 'big')
 
-        scalar = (e * k_seed + r) % _N
+        # Butterfly expansion when sgn_expnsn.key is present (pseudonym bundle)
+        exp_path = os.path.join(bundle_dir, 'sgn_expnsn.key')
+        if os.path.exists(exp_path):
+            with open(exp_path, 'rb') as f:
+                sgn_expnsn = f.read()
+            # i and j are hex values encoded in the filename: {i}_{j}.cert
+            basename = os.path.splitext(os.path.basename(cert_path))[0]
+            parts = basename.split('_')
+            i_val = int(parts[0], 16)
+            j_val = int(parts[1], 16)
+            f_ij = _expansion_scalar_aes_dm(sgn_expnsn, i_val, j_val, _N)
+            kU = (sk_base + f_ij) % _N
+        else:
+            kU = sk_base
+
+        # Correct e: SHA-256( SHA-256(COER(TBS)) || SHA-256(issuer_cert) ) mod n
+        cert_dict = decode_oer("Certificate", cert_bytes)
+        tbs_coer = encode_jer("ToBeSignedCertificate", cert_dict["toBeSigned"])
+        issuer_info = cert_dict.get("issuer", {})
+        issuer_hid8_hex = (issuer_info.get("sha256AndDigest")
+                           or issuer_info.get("sha384AndDigest"))
+        if issuer_hid8_hex:
+            try:
+                issuer_cert_coer = _find_issuer_cert_coer(
+                    bundle_dir, bytes.fromhex(issuer_hid8_hex))
+                e = int.from_bytes(
+                    hashlib.sha256(
+                        hashlib.sha256(tbs_coer).digest() +
+                        hashlib.sha256(issuer_cert_coer).digest()
+                    ).digest(), 'big'
+                ) % _N
+            except RuntimeError as exc:
+                print(f"  WARNING: {exc}; falling back to SHA256(cert) for e",
+                      file=sys.stderr)
+                e = int.from_bytes(hashlib.sha256(cert_bytes).digest(), 'big') % _N
+        else:
+            e = int.from_bytes(hashlib.sha256(cert_bytes).digest(), 'big') % _N
+
+        scalar = (r + (e * kU) % _N) % _N
         return ec.derive_private_key(scalar, ec.SECP256R1(), default_backend())
 
     return serialization.load_pem_private_key(data, password=None,
@@ -178,6 +266,47 @@ def select_rsu_cert(certs_dir: str):
         # Print all certs found with their validity windows to aid diagnosis
         for cert_path in sorted(glob.glob(
                 os.path.join(certs_dir, 'rsu-*/downloadFiles/*.cert'))):
+            try:
+                with open(cert_path, 'rb') as fh:
+                    start, expire = parse_cert_validity(fh.read())
+                status = "not yet valid" if now < start else "expired"
+                print(f"  {cert_path}: {start.strftime('%Y-%m-%d %H:%M')} – "
+                      f"{expire.strftime('%Y-%m-%d %H:%M')} UTC  [{status}]",
+                      file=sys.stderr)
+            except ValueError:
+                print(f"  {cert_path}: could not parse validity period",
+                      file=sys.stderr)
+        sys.exit(1)
+    candidates.sort()
+    _, cert_path, key_path = candidates[0]
+    return cert_path, key_path
+
+
+def select_pseudonym_cert(certs_dir: str):
+    """Scan download/{i}/{i}_{j}.cert under certs_dir and return (cert_path, key_path)
+    for the currently valid certificate with the earliest expiry.
+    Exits with an error if no valid certificate is found.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    candidates = []
+    for cert_path in sorted(glob.glob(
+            os.path.join(certs_dir, 'download', '*', '*.cert'))):
+        key_path = cert_path[:-5] + '.s'
+        if not os.path.exists(key_path):
+            continue
+        try:
+            with open(cert_path, 'rb') as fh:
+                start, expire = parse_cert_validity(fh.read())
+        except ValueError:
+            continue
+        if start <= now < expire:
+            candidates.append((expire, cert_path, key_path))
+    if not candidates:
+        print(f"ERROR: no valid pseudonym certificate found under {certs_dir}/download/ "
+              f"(current UTC time: {now.strftime('%Y-%m-%d %H:%M:%S')})",
+              file=sys.stderr)
+        for cert_path in sorted(glob.glob(
+                os.path.join(certs_dir, 'download', '*', '*.cert'))):
             try:
                 with open(cert_path, 'rb') as fh:
                     start, expire = parse_cert_validity(fh.read())
@@ -293,8 +422,10 @@ def main():
         description="Build SaeJ3287Data COER variants (plaintext / signed / sTE)"
     )
     p.add_argument("--certs-dir",
-                   help="SCMS organisation cert store directory (e.g. certs/e0c324c643aca860); "
-                        "the currently valid rsu-*/downloadFiles/ cert is selected automatically")
+                   help="SCMS bundle directory. For RSU bundles (rsu-*/downloadFiles/ layout) "
+                        "the currently valid cert is selected automatically. For pseudonym bundles "
+                        "(download/{i}/{i}_{j}.cert layout with sgn_expnsn.key) butterfly expansion "
+                        "is applied automatically. Detection is based on the presence of download/.")
     p.add_argument("--sign-api-key",
                    help="ISS virtual-device x-virtual-api-key token; "
                         "when supplied the ISS sign API is used instead of local ECQV signing")
@@ -338,8 +469,15 @@ def main():
         sys.exit(1)
 
     if args.certs_dir:
-        cert_path, key_path = select_rsu_cert(args.certs_dir)
-        signing_key = load_signing_key(key_path)
+        if os.path.isdir(os.path.join(args.certs_dir, 'download')):
+            # Pseudonym bundle: download/{i}/{i}_{j}.cert + sgn_expnsn.key
+            print(f"  Detected pseudonym bundle: {args.certs_dir}", file=sys.stderr)
+            cert_path, key_path = select_pseudonym_cert(args.certs_dir)
+            signing_key = load_signing_key(key_path, bundle_dir=args.certs_dir)
+        else:
+            # RSU bundle: rsu-*/downloadFiles/*.cert
+            cert_path, key_path = select_rsu_cert(args.certs_dir)
+            signing_key = load_signing_key(key_path)
         with open(cert_path, 'rb') as fh:
             cert_bytes_selected = fh.read()
         print(f"  Selected cert: {cert_path} "
