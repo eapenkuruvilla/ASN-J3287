@@ -266,6 +266,17 @@ python3 create_mbr.py \
 
 > **Note:** `--sign-api-key` may be substituted for `--certs-dir` above, but the ISS API adds `generationTime`/`expiryTime` to `headerInfo` making the inner signed payload non-conformant with `SaeJ3287Mbr-Signed` absence constraints.
 
+**MA HashedId8 identifiers (`recipientId` in `certRecipInfo`)**
+
+The `recipientId` field in an encrypted MBR is `SHA-256(ma_cert)[-8:]` — the HashedId8 of the MA certificate the message was encrypted to. An RA can extract this field from the raw COER without decrypting the payload and use it to route the MBR to the correct MA, including across SCMS providers.
+
+| `recipientId` | MA |
+|---------------|----|
+| `A08430C61A34C7E8` | ISS pre-production MA |
+| `CE248AFFB5F88ACD` | SaeSol MA |
+
+**Cross-provider routing:** The signer's SCMS (identified by the CA HashedId8 in the cert chain — see [Identifying the certificate provider](#identifying-the-certificate-provider-from-a-coer-file)) and the MA's SCMS (identified by `recipientId`) can differ. An RA receiving an MBR-sTE should check `recipientId` against its known MA registry: if the `recipientId` matches a foreign MA, the RA forwards the MBR to that MA rather than its own.
+
 ### Validate Signed MBR — `validate_mbr.py`
 
 Validates a signed MBR against the ISS SCMS virtual device API
