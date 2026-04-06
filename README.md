@@ -62,7 +62,7 @@ python3 create_mbr.py \
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --out-dir coer/
 ```
 
@@ -70,7 +70,7 @@ python3 create_mbr.py \
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --sign-api-key "<x-virtual-api-key token>" \
     --out-dir coer/
 ```
@@ -81,7 +81,7 @@ python3 create_mbr.py \
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/application/e0c324c643aca860 \
     --out-dir coer/
 ```
@@ -92,7 +92,7 @@ The currently valid RSU certificate is selected automatically from `rsu-*/downlo
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
     --out-dir coer/
 ```
@@ -101,7 +101,7 @@ python3 create_mbr.py \
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/SaeSol/application/b831f0c528d4c4a3 \
     --out-dir coer/
 ```
@@ -110,7 +110,7 @@ python3 create_mbr.py \
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/SaeSol/pseudonym/63efb57ac6280708 \
     --out-dir coer/
 ```
@@ -225,7 +225,7 @@ Use `--recipient-cert` with local ECQV signing to produce a fully conformant sig
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/application/e0c324c643aca860 \
     --recipient-cert certs/ma_keys/iss_ma_public_key.cert \
     --out-dir coer/
@@ -235,7 +235,7 @@ Or with the SaeSol MA cert:
 
 ```bash
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/application/e0c324c643aca860 \
     --recipient-cert certs/ma_keys/saesol_ma_public_key.cert \
     --out-dir coer/
@@ -309,7 +309,7 @@ python3 decrypt_mbr.py [file] --api-key <token> [--url <base_url>]
 ```bash
 # 1. Create sTE encrypted to the virtual device's own key (rekRecipInfo)
 python3 create_mbr.py \
-    --bsm coer/bad_accel.coer \
+    --bsm coer/bad_accel_iss_key.coer \
     --sign-api-key "<token>" \
     --encrypt-api-key "<token>" \
     --encrypt-recipient-id "<device-id>" \
