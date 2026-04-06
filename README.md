@@ -152,7 +152,9 @@ Chain of trust (bottom → top):
 
 ```
 downloadFiles/<HashedId8>.s     32-byte private key reconstruction value r (NOT the final key)
-downloadFiles/<HashedId8>.cert  Authorization Ticket (AT / application cert, 80 bytes)
+downloadFiles/<HashedId8>.cert  Authorization Ticket (AT / application cert)
+                                    ISS: 80 bytes (implicit/ECQV)
+                                    SaeSol: 107 bytes (explicit)
                                     signed by ↓
 trustedcerts/pca                PCA (issues both RSU application and OBU pseudonym certs)
                                     signed by ↓
@@ -163,8 +165,29 @@ trustedcerts/rca                Root CA (offline trust anchor)
 
 For RSUs, `downloadFiles/<HashedId8>.cert` and `downloadFiles/<HashedId8>.s` are the operational signing credentials — the `certchain/` contents are a packaging artifact of the SCMS download format and are not used. RSUs do not rotate certificates (rotation applies to OBUs only).
 
+**`downloadFiles/` naming convention:**
 
-**Implicit certificates:** The ISS SCMS issues **implicit certificates** (ECQV — Elliptic Curve Qu-Vanstone) for North American V2X per IEEE 1609.2. Unlike explicit certificates which carry a public key and CA signature as separate fields, an implicit cert superimposes them into a single reconstruction value — resulting in the compact 79–80 byte size seen here. The receiver reconstructs the sender's public key from the cert and implicitly verifies it in one step.
+| Provider | Filename convention | Cert size |
+|----------|---------------------|-----------|
+| ISS | SCMS-assigned ID (not `SHA-256(cert)[-8:]`) | 80 bytes |
+| SaeSol | `SHA-256(cert)[-8:]` (standard IEEE 1609.2 HashedId8) | 107 bytes |
+
+**Identifying the certificate provider from a COER file**
+
+A signed `Ieee1609Dot2Data` (BSM or MBR) contains the signer's certificate chain, which embeds the issuer's HashedId8 (`SHA-256(issuer_cert)[-8:]`). Scanning the raw COER bytes for known CA HashedId8 values identifies the provider without decoding:
+
+| HashedId8 | Provider | CA role |
+|-----------|----------|---------|
+| `1631AFB5FC255D0F` | ISS | PCA |
+| `7F0838125C75521B` | ISS | ICA |
+| `93232614EE5E6F5B` | ISS | RCA |
+| `D2EC3E78F493CF68` | SaeSol | PCA |
+| `36F8FFD2C4DA2747` | SaeSol | ICA |
+| `09F453B62DE0813A` | SaeSol | RCA |
+
+`bad_accel_iss_key.coer` was confirmed ISS-signed: `1631AFB5FC255D0F` (ISS PCA) found at offset `0x0c1`.
+
+**Implicit certificates:** Both ISS and SaeSol issue **implicit certificates** (ECQV — Elliptic Curve Qu-Vanstone) per IEEE 1609.2. Unlike explicit certificates which carry a public key and CA signature as separate fields, an implicit cert superimposes them into a single reconstruction value. The receiver reconstructs the sender's public key from the cert and implicitly verifies it in one step.
 
 ECQV key reconstruction formula (IEEE 1609.2 §5.3.2 / SCMS profile):
 ```
