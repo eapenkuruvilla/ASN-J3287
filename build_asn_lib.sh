@@ -61,12 +61,12 @@ echo "==> Generating $PDU_TABLE..."
 # ── Step 3: compile shared library ──────────────────────────────────────────
 echo "==> Compiling $OUT..."
 
-src_files=$(find "$ASN1C_CODE" -maxdepth 1 -name "*.c" ! -name "converter-example.c" | sort)
+mapfile -t src_files < <(find "$ASN1C_CODE" -maxdepth 1 -name "*.c" ! -name "converter-example.c" | sort)
 
 gcc -shared -fPIC \
     -I"$SKELETONS" \
     -I"$ASN1C_CODE"    \
-    $src_files     \
+    "${src_files[@]}" \
     -o "$OUT"
 
 echo "==> Done: $OUT"

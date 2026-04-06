@@ -169,8 +169,7 @@ def main():
         print("  Full response body:")
         print(json.dumps(body, indent=4))
 
-        if resp.status_code != 200:
-            sys.exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

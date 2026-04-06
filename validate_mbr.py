@@ -100,6 +100,8 @@ def main():
                    help="x-virtual-api-key token for the ISS virtual device")
     p.add_argument("--url", default=DEFAULT_URL,
                    help=f"ISS DMS base URL (default: {DEFAULT_URL})")
+    p.add_argument("--dump-response", action="store_true",
+                   help="Print the raw JSON response body from the ISS API")
     args = p.parse_args()
 
     # ── Read and extract Ieee1609Dot2Data bytes ───────────────────────────────
@@ -142,6 +144,9 @@ def main():
 
     if status in ("valid", "success"):
         print("  Signature is VALID — certificate chain recognized by ISS SCMS.")
+        if args.dump_response:
+            print("\n  Raw API response:")
+            print(json.dumps(body, indent=4))
         if "innerPayload" in body:
             print_inner_payload(body["innerPayload"])
 
@@ -173,8 +178,7 @@ def main():
         except Exception as exc:
             print(f"    (decode failed: {exc})")
 
-        if resp.status_code != 200:
-            sys.exit(1)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,8 @@ create_mbr.py - Build SaeJ3287Data from an input BSM (Ieee1609Dot2Data).
 Usage:
     python3 create_mbr.py \\
         --bsm <file.coer> \\
-        [--sign-api-key <token>]          # ISS virtual-device signing (recommended)
-        [--certs-dir <path>]              # local ECQV signing (RSU or pseudonym bundle)
+        [--certs-dir <path>]              # local ECQV signing (RSU or pseudonym bundle) — conformant
+        [--sign-api-key <token>]          # ISS virtual-device signing (adds generationTime — not fully conformant)
         [--recipient-cert <ma.cert>]      # certRecipInfo encryption to MA cert
         [--encrypt-api-key <token>        # rekRecipInfo encryption via ISS API
          --encrypt-recipient-id <id>]
@@ -119,9 +119,10 @@ def _find_issuer_cert_coer(bundle_dir: str, issuer_hid8: bytes) -> bytes:
 
 
 def load_signing_key(path: str, bundle_dir: str = None):
-    """Load the actual P-256 signing key for an ISS SCMS application certificate.
+    """Load the actual P-256 signing key for an SCMS application certificate.
 
-    ISS SCMS issues implicit (ECQV) application certificates per IEEE 1609.2.
+    Supports any SCMS provider (ISS, SaeSol, etc.) that issues implicit (ECQV)
+    application certificates per IEEE 1609.2 with the standard bundle layout.
 
     For RSU bundles (rsu-N/downloadFiles/<hash>.s):
       bundle_dir defaults to the rsu-N/ directory (one level above downloadFiles/).
