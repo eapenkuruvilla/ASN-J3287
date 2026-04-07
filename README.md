@@ -174,7 +174,28 @@ For RSUs, `downloadFiles/<HashedId8>.cert` and `downloadFiles/<HashedId8>.s` are
 
 **Identifying the certificate provider from a COER file**
 
-A signed `Ieee1609Dot2Data` (BSM or MBR) contains the signer's certificate chain, which embeds the issuer's HashedId8 (`SHA-256(issuer_cert)[-8:]`). Scanning the raw COER bytes for known CA HashedId8 values identifies the provider without decoding:
+A signed `Ieee1609Dot2Data` (BSM or MBR) can carry the signer's certificate in one of two ways:
+
+| `SignerIdentifier` CHOICE | Content | Provider identifiable? |
+|--------------------------|---------|------------------------|
+| `certificate` | Full cert embedded — contains `issuer.sha256AndDigest` (PCA HashedId8) | Yes — scan raw bytes for known CA HashedId8 |
+| `digest` | 8-byte `HashedId8` of the leaf cert only | **No** — two-step: digest → cached cert → PCA HashedId8 → provider |
+
+`digest` is `SHA-256(leaf_pseudonym_cert)[-8:]`. It identifies a specific leaf cert, not a provider. Provider identity is one level up in the chain:
+
+```
+signer: digest  →  HashedId8 of OBU pseudonym cert
+                        │  (requires cached full cert)
+                        ↓
+                   cert.issuer.sha256AndDigest  =  HashedId8 of PCA
+                        │
+                        ↓  (PCA HashedId8 lookup table below)
+                   ISS or SaeSol
+```
+
+When a full-cert BSM is received the RSU should cache both the cert bytes and the derived provider against the leaf cert's HashedId8, so that subsequent `digest`-only BSMs from the same OBU resolve to a provider in one step.
+
+When a `certificate` BSM is received, scan the raw COER bytes for the known PCA/ICA/RCA HashedId8 values:
 
 | HashedId8 | Provider | CA role |
 |-----------|----------|---------|
@@ -186,6 +207,17 @@ A signed `Ieee1609Dot2Data` (BSM or MBR) contains the signer's certificate chain
 | `09F453B62DE0813A` | SaeSol | RCA |
 
 `bad_accel_iss_key.coer` was confirmed ISS-signed: `1631AFB5FC255D0F` (ISS PCA) found at offset `0x0c1`.
+
+**BSM cert hydration for MBR evidence**
+
+The MA requires the full certificate of the misbehaving device in the MBR evidence to perform remediation (e.g. certificate revocation). If the misbehaving BSM carries only a `digest`, the RSU must substitute the full cert before embedding it as evidence:
+
+1. When any BSM with `signer: certificate` is received, cache `HashedId8 → (cert_bytes, provider)`.
+2. When building an MBR, if the evidence BSM has `signer: digest`, look up the HashedId8 in the cache and replace `digest` with `certificate`.
+3. This substitution is **signature-preserving** — `SignerIdentifier` is outside the signed scope (`ToBeSignedData`) in IEEE 1609.2.
+4. If the cache has no entry for the digest (misbehavior detected on the very first BSM from that OBU), embed the BSM as-is; the MA will need to retrieve the cert through other means.
+
+> **Not yet implemented** — `create_mbr.py` currently embeds the BSM evidence as-is without cert hydration.
 
 **Implicit certificates:** Both ISS and SaeSol issue **implicit certificates** (ECQV — Elliptic Curve Qu-Vanstone) per IEEE 1609.2. Unlike explicit certificates which carry a public key and CA signature as separate fields, an implicit cert superimposes them into a single reconstruction value. The receiver reconstructs the sender's public key from the cert and implicitly verifies it in one step.
 
