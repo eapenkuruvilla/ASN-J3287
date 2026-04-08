@@ -640,6 +640,53 @@ Verified against IEEE Std 1609.2-2022. The local ECQV signing path (`--certs-dir
 |---|-------|----------|----------------|
 | 1 | **ECIES P1 / recipientId require cert bytes** — when `--recipient-pub` is used without `--recipient-cert`, KDF2 P1 = `b""` and recipientId = 8 zero bytes. Use `--recipient-cert <ma.cert>` to produce standard-compliant output. | Low (use `--recipient-cert`) | `out_ste.coer` |
 
+## MA Encryption Key Selection — Cross-PKI Analysis
+
+### The question
+
+When encrypting an MBR (`SaeJ3287Mbr-STE`), **which MA's public key is used** when the misbehaving vehicle's pseudonym certificate was issued by a different SCMS than the reporting device's?
+
+### What the standards say
+
+**ETSI TS 103 759 V2.1.1, §8.2 (MA SSP):**
+> *"The reporting ITS-S shall encrypt misbehaviour reports related to a specific ITS-AID **using the MA certificate which contains this specific ITS-AID in the MA SSP structure**."*
+
+**IEEE 1609.2.1-2022, §7.6.2.12 (MaSsp):**
+> *"The certificate containing this SSP is the MA Certificate to which an end entity should encrypt misbehavior reports related to the indicated PSIDs."*
+
+**IEEE 1609.2.1-2022, §4.1.5 (Misbehavior authorities):**
+> *"A reporting EE will obtain the certificates for the MAs responsible for the PSIDs for which the EE will generate misbehavior reports."*
+
+> *"When the end entity sends the misbehavior reports to the RA, the cleartext metadata in the report contains information that **allows the RA to determine which MA to send the report to** and otherwise does not contain information about the payload of the report."*
+
+**IEEE 1609.2.1-2022, §7.6.3.9 NOTE (MA certificate profile):**
+> *"Although the MA certificate is issued by a specific CA, **the MA is authorized to receive misbehavior reports from and about end-entities whose certificates are issued by any CA within the system**. In other words, the issuance of the MA certificate by a specific CA does not imply that that CA has any particular control over the MA."*
+
+### Answer
+
+**The MA is selected by PSID (application type), not by which SCMS issued the misbehaving vehicle's certificate.**
+
+The reporter:
+1. Calls `GET /ma-certificate?psid=20` (hex for BSM PSID 32) on **its own RA**
+2. Receives the MA certificate whose `MaSsp` lists that PSID
+3. Encrypts the signed MBR to **that MA's `encryptionKey`**
+4. Submits the ciphertext to **its own RA**, which routes it to the MA based on cleartext metadata in the report
+
+IEEE 1609.2.1 §7.6.3.9 is explicit: an MA's authority is PSID-scoped, not SCMS-scoped. One MA is intended to handle reports about misbehaving vehicles regardless of which SCMS issued their certificates. The reporter's RA acts as the routing gateway.
+
+### Gaps not addressed by the standards
+
+| Gap | What the standard says | What it leaves out |
+|---|---|---|
+| **Multi-MA deployments** | "Different domains may have different MAs; different MAs may handle reports for different PSIDs" | Does not say which MA wins if two SCMSes each operate their own BSM MA |
+| **Cross-SCMS RA routing** | "Cleartext metadata in the report allows the RA to determine which MA to send to" | Does not define what that metadata is or its format — left to application specs |
+| **MA certificate discovery** | EE gets MA cert from its own RA via `psid` query | Does not specify how the RA knows which MA is authoritative for vehicles from a foreign SCMS |
+| **Linkage data jurisdiction** | MA analyzes reports and may initiate revocation | Does not address the case where the receiving MA does not hold linkage data for the misbehaving vehicle's SCMS — cross-SCMS revocation coordination is out of scope for all three standards |
+
+The US deployment includes multiple SCMS providers (e.g. ISS, SaeSol), so this gap is a real design issue in domestic deployments today, not only in international interoperability scenarios.
+
+**Relevant standards reviewed:** SAE J3287 (January 2024 draft), ETSI TS 103 759 V2.1.1 (2023-01), IEEE 1609.2.1-2022.
+
 ## Key Standards
 
 | Standard | Scope |
