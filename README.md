@@ -430,6 +430,52 @@ python3 decode_mbr.py coer/out_plaintext.coer
 python3 decode_mbr.py coer/out_signed.coer
 ```
 
+### pycrate Schema Compatibility — `test_pycrate_schema.py`
+
+Verifies that the `pycrate` library can compile and use all 29 schemas in `asn/J3287_ASN_flat/`, then attempts OER round-trip encode/decode on the key PDU types.
+
+```bash
+python3 test_pycrate_schema.py
+```
+
+**Result:** `pycrate` **CAN** handle the J3287_ASN_flat schema after the preprocessing workarounds described below.  All 9 target PDUs are found and both OER decode tests pass.
+
+#### pycrate Compatibility Findings
+
+The schemas use several advanced ASN.1 features that pycrate does not fully support.  `test_pycrate_schema.py` preprocesses every schema file before handing it to pycrate, applying the following transformations (all semantically safe for encoding/decoding purposes):
+
+| # | Symptom | Root cause | Fix applied |
+|---|---------|-----------|-------------|
+| 1 | `AssertionError` in `_path_trunc(2)` | `(CONSTRAINED BY { ... })` blocks nested inside `WITH COMPONENTS` constraints crash pycrate's constraint parser | Strip every `(CONSTRAINED BY { … })` token; the bodies are purely documentary prose or commented-out structure descriptions |
+| 2 | `AssertionError` in `_path_trunc(2)` | `(TypeName (SIZE (N)))` in a `WITH COMPONENTS` component constraint: pycrate creates an ObjProxy for the type and then tries `_parse_const_size` on it, failing a depth assertion | Strip the inner `(SIZE (N))` — reduce `(TypeName (SIZE (N)))` to `(TypeName)` |
+| 3 | `AssertionError` in `_path_trunc(2)` | `fieldName (SIZE(N))` on a lowercase component inside `WITH COMPONENTS`: same ObjProxy/size path failure as above | Strip the `(SIZE(N))` suffix from lowercase field names in constraints |
+| 4 | `invalid ident in WITH COMPONENTS constraint` | `(WITH COMPONENT (Type))` (singular, for `SEQUENCE OF` elements) leaves a residual `^(SIZE(N))` token after stripping that pycrate cannot parse | Strip the entire `(WITH COMPONENT (…))` token; also strip any dangling `(^(SIZE(N)))` intersection wrapper left behind |
+| 5 | `missing mandatory components in WITH COMPONENTS` | Some schemas omit the `…,` partial indicator from `WITH COMPONENTS {` blocks that list only a subset of fields | Insert `…,` before the first component in any `WITH COMPONENTS {` block that lacks it |
+| 6 | `invalid order of components in WITH COMPONENTS` | `EtsiTs103759Core.asn` `EtsiTs103759Mbr-STE`: the `recipients` field of `EncryptedData` is left as a bare field name after the `CONSTRAINED BY` is stripped, and appears after `ciphertext` (wrong order per the SEQUENCE definition) | Strip the bare `recipients` entry and the preceding comma |
+| 7 | `undefined field reference for table constraint` | IOC component-relation constraints of the form `{TypeSet}{@.fieldName}` — pycrate cannot resolve the `@.fieldName` path reference | Strip the `{@.fieldName}` suffix from IOC table constraints |
+
+> **Note on `strip_constrained_by` brace accounting:** Several `CONSTRAINED BY` bodies mix a comment line that opens a `{` (e.g. `-- encryption of … (WITH COMPONENTS {`) with real ASN.1 code that closes it.  The stripper tracks `comment_open_excess` — unmatched `{` inside comment lines — and consumes that many extra `})` after the closing brace to keep the outer structure balanced.  This handles the common pattern in `Ieee1609Dot2Dot1Protocol.asn` where all-comment bodies leave orphaned `})` in the file; for the one case in `EtsiTs103759Core.asn` where real code already balances the comment's `{`, the excess-consuming correctly shifts `recipients` to the right nesting depth (inside `encryptedData WITH COMPONENTS`), after which the ordering fix above removes it.
+
+### asn1c vs pycrate — Which is cleaner?
+
+**Short answer: asn1c is the cleaner production choice; pycrate is useful for Python-native introspection.**
+
+| Criterion | asn1c (`libasn1c.so`) | pycrate |
+|---|---|---|
+| Schema ingestion | Compiles all 29 schemas **as-is** with no preprocessing | Requires 7 preprocessing transformations; some are fragile |
+| ASN.1 feature support | Full: IOC, parameterized types, component-relation constraints, `WITH COMPONENT` (singular) | Partial: IOC table constraints silently stripped; `CONSTRAINED BY` bodies dropped |
+| Encoding correctness | Validated against real V2X toolchain; COER/OER byte-accurate | OER round-trip passes for J3287 test PDUs, but stripped constraints mean some semantic checks are skipped |
+| Runtime integration | C shared library (`libasn1c.so`) called via `ctypes`; requires a one-time native build | Pure Python; `pip install pycrate` is enough |
+| Encode/decode speed | Fast (compiled C) | Slower (Python) |
+| Schema introspection from Python | Not directly — requires parsing the generated C headers | Natural: `mod['TypeName']` returns a live object you can walk |
+| Best fit | OER encoding/decoding, CI regression testing, production V2X pipelines | Rapid schema exploration, UPER decoding of J2735 BSMs, Python-only environments |
+
+**Practical guidance:**
+
+- Use **asn1c** (via `libasn1c.so` / `encode_mbr.py` / `decode_mbr.py`) as the production encode/decode path.  It handles the full schema without modification and produces byte-accurate COER output.
+- Use **pycrate** (via `test_pycrate_schema.py`) as a development-time compatibility probe or when you need to inspect the schema object model from Python.  The preprocessing workarounds are contained in one file and do not affect the schemas on disk.
+- `test_pycrate_schema.py` is **not** the production path — it is a schema regression test and exploration tool.
+
 ## Process Flow
 
 ```
@@ -562,6 +608,7 @@ ASN1/
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
 ├── build_asn_lib.sh        Compile asn1c_code/ → lib/libasn1c.so
 ├── compile_asn1.sh         Run asn1c on asn/J3287_ASN_flat/ → asn1c_code/
+├── test_pycrate_schema.py  pycrate schema compatibility test (see pycrate findings)
 └── requirements.txt        Python dependencies
 ```
 
