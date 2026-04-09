@@ -19,6 +19,7 @@ Standards reference:
 """
 
 import argparse
+import datetime
 import hashlib
 import os
 import struct
@@ -46,6 +47,44 @@ def _get_pycrate_mod():
         return mod
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Time helpers
+# ---------------------------------------------------------------------------
+
+_TAI_EPOCH = datetime.datetime(2004, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _tai32_fmt(tai_secs: int | None) -> str:
+    """Format a Time32 (TAI seconds since 2004-01-01) as UTC + relative-to-now.
+
+    Example outputs:
+      2026-04-02 15:30 UTC  (7 days ago)
+      2026-04-16 10:00 UTC  (in 7 days)
+      2026-04-09 12:00 UTC  (now)
+    """
+    if tai_secs is None:
+        return "n/a"
+    dt = _TAI_EPOCH + datetime.timedelta(seconds=int(tai_secs))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    delta = dt - now
+    total_secs = int(delta.total_seconds())
+    abs_secs = abs(total_secs)
+
+    if abs_secs < 60:
+        rel = "now"
+    elif abs_secs < 3600:
+        mins = abs_secs // 60
+        rel = f"in {mins}m" if total_secs > 0 else f"{mins}m ago"
+    elif abs_secs < 86400:
+        hours = abs_secs // 3600
+        rel = f"in {hours}h" if total_secs > 0 else f"{hours}h ago"
+    else:
+        days = abs_secs // 86400
+        rel = f"in {days}d" if total_secs > 0 else f"{days}d ago"
+
+    return f"{dt.strftime('%Y-%m-%d %H:%M')} UTC  ({rel})"
 
 
 # ---------------------------------------------------------------------------
@@ -119,25 +158,37 @@ def ra_url_from_cert(certs_dir: str) -> str | None:
     """
     IEEE 1609.2.1 §7.6.3.10: the RA certificate's toBeSigned.id field SHALL be
     of type name and SHALL equal the RA identifying URL.
-    Extract it from trustedcerts/ra.
+
+    Searches in order:
+      1. <certs_dir>/trustedcerts/ra          (flat / pseudonym layout)
+      2. <certs_dir>/rsu-*/trustedcerts/ra    (RSU bundle layout)
+      3. <certs_dir>/download/trustedcerts/ra (pseudonym bundle variant)
+    Returns the URL from the first readable file.
     """
-    ra_cert_path = os.path.join(certs_dir, "trustedcerts", "ra")
-    if not os.path.exists(ra_cert_path):
-        return None
+    import pathlib
+    root = pathlib.Path(certs_dir)
+    candidates = [root / "trustedcerts" / "ra"]
+    for p in sorted(root.glob("rsu-*/trustedcerts/ra")):
+        candidates.append(p)
+    candidates.append(root / "download" / "trustedcerts" / "ra")
+
     mod = _get_pycrate_mod()
     if mod is None:
         return None
-    try:
-        Cert = mod.Ieee1609Dot2.Certificate
-        data = open(ra_cert_path, "rb").read()
-        Cert.from_oer(data)
-        v = Cert.get_val()
-        cert_id = v.get("toBeSigned", {}).get("id", [None, None])
-        if isinstance(cert_id, (list, tuple)) and cert_id[0] == "name":
-            hostname = cert_id[1]
-            return f"https://{hostname}"
-    except Exception as e:
-        print(f"  [ra_url_from_cert] {e}")
+    for ra_path in candidates:
+        if not ra_path.exists():
+            continue
+        try:
+            Cert = mod.Ieee1609Dot2.Certificate
+            data = ra_path.read_bytes()
+            Cert.from_oer(data)
+            v = Cert.get_val()
+            cert_id = v.get("toBeSigned", {}).get("id", [None, None])
+            if isinstance(cert_id, (list, tuple)) and cert_id[0] == "name":
+                hostname = cert_id[1]
+                return f"https://{hostname}"
+        except Exception as e:
+            print(f"  [ra_url_from_cert] {ra_path}: {e}")
     return None
 
 
@@ -500,7 +551,7 @@ def main():
     # ---- Step 2b: auto-discover RA URL from trustedcerts/ra ----
     ra_url = args.ra_url
     if ra_url is None:
-        print(f"\n[2b] Auto-discovering RA URL from {args.certs_dir}/trustedcerts/ra ...")
+        print(f"\n[2b] Auto-discovering RA URL from {args.certs_dir} ...")
         ra_url = ra_url_from_cert(args.certs_dir)
         if ra_url:
             print(f"  RA URL from certificate: {ra_url}")
@@ -568,8 +619,8 @@ def main():
     i_rev = (ts[1] or {}).get("iRev", "n/a") if isinstance(ts, (list, tuple)) else "n/a"
 
     print(f"  CRL type    : {crl_type}")
-    print(f"  issueDate   : {crl_contents.get('issueDate')}")
-    print(f"  nextCrl     : {crl_contents.get('nextCrl')}")
+    print(f"  issueDate   : {_tai32_fmt(crl_contents.get('issueDate'))}")
+    print(f"  nextCrl     : {_tai32_fmt(crl_contents.get('nextCrl'))}  (i-period rollover; CRL may be reissued earlier on revocation)")
     if crl_type in ("fullHashCrl", "deltaHashCrl"):
         entries = (ts[1] or {}).get("entries", []) if isinstance(ts, (list, tuple)) else []
         print(f"  crlSerial   : {crl_serial}")
@@ -580,10 +631,43 @@ def main():
         individual = tbs_crl.get("individual") or []
         groups = tbs_crl.get("groups") or []
         grp_single = tbs_crl.get("groupsSingleSeed") or []
+        index_within_i = tbs_crl.get("indexWithinI", "n/a")
         print(f"  iRev        : {i_rev}")
+        print(f"  indexWithinI: {index_within_i}  (increments each time a new CRL is issued within this i-period)")
         print(f"  individual  : {len(individual)} JMaxGroup(s)")
         print(f"  groups      : {len(groups)} GroupCrlEntry(s)")
         print(f"  groupsSingle: {len(grp_single)} GroupSingleSeedEntry(s)")
+
+        # Show computed linkage values for every individual entry so they can
+        # be compared against cert linkage values when no match is found.
+        def _lv_bytes(val):
+            if isinstance(val, (bytes, bytearray)):
+                return bytes(val)
+            if isinstance(val, str):
+                return val.encode("latin-1")
+            if isinstance(val, (list, tuple)):
+                return bytes(val)
+            return b""
+
+        entry_idx = 0
+        for jmax_group in individual:
+            if not isinstance(jmax_group, dict):
+                continue
+            for la_group in (jmax_group.get("contents") or []):
+                if not isinstance(la_group, dict):
+                    continue
+                for imax_group in (la_group.get("contents") or []):
+                    if not isinstance(imax_group, dict):
+                        continue
+                    for ir in (imax_group.get("contents") or []):
+                        if not isinstance(ir, dict):
+                            continue
+                        s1 = _lv_bytes(ir.get("linkageSeed1", b""))
+                        s2 = _lv_bytes(ir.get("linkageSeed2", b""))
+                        if len(s1) == 16 and len(s2) == 16:
+                            lv = compute_linkage_value(s1, s2, i_rev)
+                            print(f"    [{entry_idx:3d}] i={i_rev}  lv={lv.hex()}")
+                            entry_idx += 1
 
     # ---- Step 6: check revocation ----
     print("\n[6] Checking revocation ...")

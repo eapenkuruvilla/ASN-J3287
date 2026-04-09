@@ -40,6 +40,7 @@ python3 create_mbr.py \
                                     #   signs via ISS API — mutually exclusive with --certs-dir
     [--sign-api-url <url>]          # ISS DMS base URL for signing and API-based encryption (default: https://api.dm.preprod.v2x.isscms.com)
     [--recipient-cert <file>]       # Recipient MA cert file (COER) — enables out_ste.coer (certRecipInfo, preferred)
+                                    #   if omitted and --certs-dir is set, MA cert is auto-downloaded from trustedcerts/ra
     [--recipient-pub <hex>]         # Recipient P-256 public key (64–65 bytes hex) — enables out_ste.coer (no cert → non-compliant P1/recipientId)
     [--encrypt-api-key <token>]     # ISS virtual-device token for API-based encryption (rekRecipInfo)
     [--encrypt-recipient-id <id>]   #   Device ID to encrypt to (required with --encrypt-api-key)
@@ -56,7 +57,7 @@ python3 create_mbr.py \
 |------|------|---------|
 | `out_plaintext.coer` | `SaeJ3287Data { version=1, content: plaintext(SaeJ3287Mbr) }` | always |
 | `out_signed.coer` | `SaeJ3287Data { version=1, content: signed(Ieee1609Dot2Data) }` | `--certs-dir` or `--sign-api-key` |
-| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + (`--recipient-cert` or `--recipient-pub` or `--encrypt-api-key` + `--encrypt-recipient-id`) |
+| `out_ste.coer` | `SaeJ3287Data { version=1, content: sTE(Ieee1609Dot2Data) }` | (`--certs-dir` or `--sign-api-key`) + (`--recipient-cert` or auto-download via `--certs-dir` or `--recipient-pub` or `--encrypt-api-key` + `--encrypt-recipient-id`) |
 
 **Example — plaintext only:**
 
@@ -424,6 +425,54 @@ The `recipientId` field in an encrypted MBR is `SHA-256(ma_cert)[-8:]` — the H
 
 **Cross-provider routing:** The signer's SCMS (identified by the CA HashedId8 in the cert chain — see [Identifying the certificate provider](#identifying-the-certificate-provider-from-a-coer-file)) and the MA's SCMS (identified by `recipientId`) can differ. An RA receiving an MBR-sTE should check `recipientId` against its known MA registry: if the `recipientId` matches a foreign MA, the RA forwards the MBR to that MA rather than its own.
 
+### Upload MBR to MA — `upload_mbr.py`
+
+Uploads a `SaeJ3287Data` COER file to the Misbehavior Report Upload Receiver (MUR) via the REST API defined in SAE J3287 §6.  Auto-detects the content type (plaintext / signed / sTE) from the `SaeJ3287MbrSec` CHOICE tag and probes common version prefixes to find the live endpoint.
+
+```bash
+python3 upload_mbr.py \
+    --mbr coer/out_ste.coer \
+    --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
+```
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `--mbr` | **required** | `SaeJ3287Data` COER file (`out_plaintext.coer`, `out_signed.coer`, or `out_ste.coer`) |
+| `--certs-dir` | — | SCMS bundle; MUR URL auto-discovered from `trustedcerts/ra` (IEEE 1609.2.1 §7.6.3.10) |
+| `--mur-url` | auto from `trustedcerts/ra` | Override MUR base URL |
+| `--api-key` | optional | `x-virtual-api-key` header (try without first — upload endpoint may be public) |
+| `--dry-run` | off | Detect content type and resolve URL without POSTing |
+
+**Auto-detection** inspects byte 1 of the COER file (the `SaeJ3287MbrSec` CHOICE tag):
+
+| Byte 1 | Content type | SAE J3287 §6 service |
+|--------|-------------|----------------------|
+| `0x80` | `plaintext` | `mbr-upload-plaintext` |
+| `0x81` | `signed` | `mbr-upload-signed` |
+| `0x82` | `sTE` | `mbr-upload-STE` |
+
+**Version prefix probing** — the script tries `""`, `/v1`, `/v2`, `/v3`, `/scms/v1`, `/scms/v3`, `/api/v3` in order, stopping on the first `2xx` response.  A `404` advances to the next prefix; any other error code (`400`, `401`, `403`, `500` …) is reported and terminates.
+
+**Examples:**
+
+```bash
+# Upload signed-then-encrypted MBR (preferred for production)
+python3 upload_mbr.py \
+    --mbr coer/out_ste.coer \
+    --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
+
+# Override MUR URL explicitly
+python3 upload_mbr.py \
+    --mbr coer/out_ste.coer \
+    --mur-url https://ra.preprod.v2x.isscms.com
+
+# Dry run: detect type and resolve URL without sending
+python3 upload_mbr.py \
+    --mbr coer/out_signed.coer \
+    --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
+    --dry-run
+```
+
 ### Validate Signed MBR — `validate_mbr.py`
 
 Validates a signed MBR against the ISS SCMS virtual device API
@@ -581,7 +630,7 @@ GET https://{ra-hostname}/v3/crl?craca={cracaId}&crlSeries={n}
 ```bash
 python3 check_crl.py \
     --certs-dir <bundle-dir> \
-    --api-key "<x-virtual-api-key>" \
+    [--api-key "<x-virtual-api-key>"] \
     [--save-crl /tmp/crl.coer] \
     [--load-crl /tmp/crl.coer]   # offline re-check without re-downloading
 ```
@@ -590,7 +639,7 @@ The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` 
 
 | Argument | Default | Notes |
 |----------|---------|-------|
-| `--api-key` | optional | `x-virtual-api-key` token; required by ISS RA, not required by SaeSol RA |
+| `--api-key` | optional | `x-virtual-api-key` token; **not required** for the ISS or SaeSol CRL endpoint (public) — may be needed for other RA endpoints |
 | `--certs-dir` | **required** | Pseudonym bundle root (must contain `download/` and `trustedcerts/`) |
 | `--ra-url` | auto from `trustedcerts/ra` cert | Override RA base URL |
 | `--craca-hex` | auto from `trustedcerts/` | HashedId8 of CRACA cert (16 hex chars) |
@@ -602,16 +651,19 @@ The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` 
 
 ```
 [4] Downloading CRL from https://ra.preprod.v2x.isscms.com ...
+  GET https://ra.preprod.v2x.isscms.com/crl?craca=93232614ee5e6f5b&crlSeries=1 → 404
   GET https://ra.preprod.v2x.isscms.com/v3/crl?craca=93232614ee5e6f5b&crlSeries=1 → 200
   Downloaded 132 bytes
 
 [5] Parsing CRL ...
   CRL type    : fullLinkedCrl
-  issueDate   : 702679996
-  nextCrl     : 703242005
-  iRev        : 587  (0x24B)
+  issueDate   : 2026-04-07 20:53 UTC  (1d ago)
+  nextCrl     : 2026-04-14 09:00 UTC  (in 6d)  (i-period rollover; CRL may be reissued earlier on revocation)
+  iRev        : 587
+  indexWithinI: 0  (increments each time a new CRL is issued within this i-period)
   individual  : 1 JMaxGroup(s)
   groups      : 0 GroupCrlEntry(s)
+  groupsSingle: 0 GroupSingleSeedEntry(s)
 
 [6] Checking revocation ...
   NOT REVOKED: 0 of 400 pseudonym certificates appear in the CRL
@@ -622,7 +674,9 @@ The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` 
 | CRL field | Value | Meaning |
 |-----------|-------|---------|
 | `fullLinkedCrl` | — | Linkage-based full CRL (pseudonym certs) |
-| `iRev = 587` (0x24B) | — | CRL covers i-period 587; bundle spans 0x249–0x25C so this is within range |
+| `iRev = 587` | — | CRL covers i-period 587; bundle spans 0x249–0x25C so this is within range |
+| `indexWithinI = 0` | — | First CRL issued for this (CRACA, crlSeries, iRev) combination; increments on each revocation-triggered re-issuance within the same i-period |
+| `nextCrl` | — | Scheduled i-period rollover — **not** the only update point; the MA reissues the CRL immediately on each revocation event, incrementing `indexWithinI` |
 | `individual: 1 JMaxGroup` | — | **One device has been revoked by the MA** — the revocation pipeline is working |
 | NOT REVOKED | — | The revoked device is not the test bundle; different linkage seeds expand to a different linkage value |
 
@@ -639,15 +693,19 @@ To verify the full MBR → MA → CRL pipeline:
        --out-dir coer/
    ```
 
-2. **Upload the signed+encrypted MBR** to the MA via the RA (`POST /v3/misbehavior-report`).  Repeat with multiple reports — the MA applies a threshold before triggering revocation.
+2. **Upload the signed+encrypted MBR** to the MUR via `upload_mbr.py`.  Repeat with multiple reports — the MA applies a threshold before triggering revocation.
+   ```bash
+   python3 upload_mbr.py \
+       --mbr coer/out_ste.coer \
+       --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
+   ```
 
-3. **Wait** for the MA to process reports and issue a new CRL.  `nextCrl` in the CRL gives the expected refresh time (Unix TAI seconds; subtract 37 for UTC).
+3. **Wait** for the MA to process the reports and issue a new CRL.  The MA reissues the CRL immediately on each revocation — it does not wait for the scheduled `nextCrl` rollover.  Poll by re-running step 4 and watching for `indexWithinI` to increment and `individual` count to increase.
 
 4. **Re-check the CRL**:
    ```bash
    python3 check_crl.py \
-       --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
-       --api-key "<key>"
+       --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
    ```
    When the MA revokes the device, the `individual` entry count increases and `NOT REVOKED` changes to `REVOKED`.
 
@@ -661,7 +719,7 @@ To verify the full MBR → MA → CRL pipeline:
 
 - **Multi-SCMS**: The CRACA is the root CA of the bundle's PKI chain.  Certs from a different SCMS (different root CA) have a different `cracaId` and belong to a different CRL series — check each SCMS's RA separately.
 - **Delta CRLs**: `deltaLinkedCrl` entries contain only revocations since the last full CRL.  The script handles both full and delta types.
-- **CRL refresh**: `nextCrl` is a Time32 (seconds since TAI epoch 2004-01-01; subtract 37 s for UTC).  The RA serves a new CRL approximately at that time.
+- **CRL update semantics**: `nextCrl` is a Time32 marking the scheduled i-period rollover (weekly for ISS), but the MA reissues the CRL immediately on every revocation event without waiting for that deadline.  Use `indexWithinI` (a Uint8 counter starting at 0) to detect mid-period reissuances: if `indexWithinI` has incremented since your last fetch, a new revocation has been published.
 - **`iRev` vs `iCert`**: `iRev` in the CRL is the i-period for which revocation takes effect; it must match `iCert` in the pseudonym cert for the derived linkage value to be correct.
 
 ### pycrate Schema Compatibility — `test_pycrate_schema.py`
@@ -838,6 +896,7 @@ ASN1/
 ├── create_mbr.py           CLI entry point — cert selection, geolocation, main()
 ├── validate_mbr.py         Validate signed MBR via ISS SCMS virtual device API
 ├── decrypt_mbr.py          Decrypt sTE MBR via ISS SCMS virtual device API
+├── upload_mbr.py           Upload SaeJ3287Data COER to MUR (SAE J3287 §6); auto-detects content type
 ├── check_crl.py            Download IEEE 1609.2 CRL from RA and check pseudonym cert revocation
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator

@@ -61,17 +61,17 @@ def geolocate_ip() -> tuple:
         print("  (requests not installed; using lat=0 lon=0 elev=0)", file=sys.stderr)
         return 0, 0, 0
     try:
-        resp = _requests.get("https://ip-api.com/json/", timeout=5)
+        resp = _requests.get("https://ipapi.co/json/", timeout=5)
         resp.raise_for_status()
         data = resp.json()
-        if data.get("status") != "success":
-            raise ValueError(data.get("message", "ip-api returned non-success"))
-        lat  = round(data["lat"] * 10_000_000)
-        lon  = round(data["lon"] * 10_000_000)
+        if "error" in data:
+            raise ValueError(data.get("reason", "ipapi.co returned error"))
+        lat  = round(data["latitude"]  * 10_000_000)
+        lon  = round(data["longitude"] * 10_000_000)
         print(f"  (IP geolocation: lat={lat}, lon={lon})", file=sys.stderr)
         return lat, lon, 0
     except Exception as exc:
-        print(f"  (IP geolocation failed: {exc}; using lat=0 lon=0 elev=0)",
+        print(f"  (IP geolocation failed (ipapi.co): {exc}; using lat=0 lon=0 elev=0)",
               file=sys.stderr)
         return 0, 0, 0
 
@@ -337,6 +337,89 @@ def select_pseudonym_cert(certs_dir: str):
     return cert_path, key_path
 
 
+def _ra_url_from_bundle(bundle_dir: str) -> str | None:
+    """Extract the RA URL from trustedcerts/ra (IEEE 1609.2.1 §7.6.3.10).
+
+    The RA certificate's toBeSigned.id.name field is the RA identifying URL.
+    Returns 'https://<hostname>' or None if the cert cannot be read/parsed.
+
+    Searches in order:
+      1. <bundle_dir>/trustedcerts/ra          (flat / pseudonym layout)
+      2. <bundle_dir>/rsu-*/trustedcerts/ra    (RSU bundle layout)
+      3. <bundle_dir>/download/trustedcerts/ra (pseudonym bundle variant)
+    Returns the URL from the first readable file.
+    """
+    import pathlib
+    root = pathlib.Path(bundle_dir)
+    candidates = [root / "trustedcerts" / "ra"]
+    # RSU bundle: trustedcerts lives inside each rsu-N/
+    for rsu_dir in sorted(root.glob("rsu-*/trustedcerts/ra")):
+        candidates.append(rsu_dir)
+    candidates.append(root / "download" / "trustedcerts" / "ra")
+
+    for ra_path in candidates:
+        if not ra_path.exists():
+            continue
+        try:
+            cert_dict = decode_oer("Certificate", ra_path.read_bytes())
+            hostname = cert_dict.get("toBeSigned", {}).get("id", {}).get("name")
+            if hostname:
+                return f"https://{hostname}"
+        except Exception:
+            pass
+    return None
+
+
+def _download_ma_cert(ra_url: str, psid_hex: str = "20") -> bytes | None:
+    """Download the MA certificate from the RA (IEEE 1609.2.1 §6.3.5.13).
+
+    Probes common version prefixes; returns raw COER cert bytes or None.
+    psid_hex is the minimal-length hex PSID of the reported application
+    (BSM = PSID 32 = '20').
+    """
+    if _requests is None:
+        print("  (requests not installed; cannot auto-download MA cert)", file=sys.stderr)
+        return None
+    for prefix in ("", "/v3", "/v2", "/v1", "/scms/v3"):
+        url = f"{ra_url.rstrip('/')}{prefix}/ma-certificate"
+        try:
+            resp = _requests.get(url, params={"psid": psid_hex}, timeout=10)
+            print(f"  GET {resp.url} → {resp.status_code}", file=sys.stderr)
+            if resp.status_code == 200 and resp.content:
+                return resp.content
+        except _requests.RequestException as exc:
+            print(f"  {url} — {exc}", file=sys.stderr)
+    return None
+
+
+def _extract_recipient_pub(cert_bytes: bytes, source: str) -> bytes:
+    """Extract the uncompressed P-256 ECIES public key from a Certificate.
+
+    MA certs carry it in toBeSigned.encryptionKey.publicKey.eciesNistP256.
+    Returns 65-byte uncompressed point (04 || x || y).
+    Raises ValueError on failure.
+    """
+    cert_dict = decode_oer("Certificate", cert_bytes)
+    try:
+        ek = cert_dict["toBeSigned"]["encryptionKey"]["publicKey"]["eciesNistP256"]
+        if "compressed-y-0" in ek:
+            raw = bytes.fromhex("02" + ek["compressed-y-0"])
+        elif "compressed-y-1" in ek:
+            raw = bytes.fromhex("03" + ek["compressed-y-1"])
+        elif "uncompressedP256" in ek:
+            raw = bytes.fromhex("04" + ek["uncompressedP256"]["x"]
+                                + ek["uncompressedP256"]["y"])
+        else:
+            raise ValueError(f"Unsupported eciesNistP256 format: {list(ek.keys())}")
+        pub_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw)
+        return pub_key.public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+    except Exception as exc:
+        raise ValueError(f"could not extract encryption key from {source}: {exc}") from exc
+
+
 def load_recipient_pub(hex_str: str) -> bytes:
     data = bytes.fromhex(hex_str.replace(':', '').replace(' ', ''))
     if len(data) == 64:
@@ -514,32 +597,39 @@ def main():
     if args.recipient_cert:
         with open(args.recipient_cert, 'rb') as fh:
             recipient_cert_bytes = fh.read()
-        # Extract the ECIES encryption public key from the cert.
-        # MA certs carry it in toBeSigned.encryptionKey.publicKey.eciesNistP256
-        # (a BasePublicEncryptionKey CHOICE, index 0).
-        cert_dict = decode_oer("Certificate", recipient_cert_bytes)
         try:
-            ek = cert_dict["toBeSigned"]["encryptionKey"]["publicKey"]["eciesNistP256"]
-            if "compressed-y-0" in ek:
-                raw = bytes.fromhex("02" + ek["compressed-y-0"])
-            elif "compressed-y-1" in ek:
-                raw = bytes.fromhex("03" + ek["compressed-y-1"])
-            elif "uncompressedP256" in ek:
-                raw = bytes.fromhex("04" + ek["uncompressedP256"]["x"] + ek["uncompressedP256"]["y"])
-            else:
-                raise ValueError(f"Unsupported eciesNistP256 format: {list(ek.keys())}")
-            pub_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw)
-            recipient_pub = pub_key.public_bytes(
-                serialization.Encoding.X962,
-                serialization.PublicFormat.UncompressedPoint,
-            )
-        except Exception as exc:
-            print(f"ERROR: could not extract encryption key from {args.recipient_cert}: {exc}",
-                  file=sys.stderr)
+            recipient_pub = _extract_recipient_pub(recipient_cert_bytes, args.recipient_cert)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)
         print(f"  Recipient cert: {args.recipient_cert} "
               f"(id: {hashlib.sha256(recipient_cert_bytes).digest()[-8:].hex().upper()})",
               file=sys.stderr)
+    elif not args.encrypt_api_key and args.certs_dir:
+        # Auto-download MA cert from the RA identified in trustedcerts/ra.
+        # Only attempted when --certs-dir is available (RA URL is discoverable).
+        # BSM MA cert uses PSID 32 (0x20) regardless of --psid (MBR header PSID).
+        ra_url = _ra_url_from_bundle(args.certs_dir)
+        if ra_url:
+            print(f"  Auto-downloading MA cert from {ra_url} (PSID 32 = BSM) ...",
+                  file=sys.stderr)
+            recipient_cert_bytes = _download_ma_cert(ra_url, psid_hex="20")
+            if recipient_cert_bytes:
+                try:
+                    recipient_pub = _extract_recipient_pub(
+                        recipient_cert_bytes, f"{ra_url}/.../ma-certificate?psid=20")
+                    print(f"  MA cert: {len(recipient_cert_bytes)} bytes  "
+                          f"(id: {hashlib.sha256(recipient_cert_bytes).digest()[-8:].hex().upper()})",
+                          file=sys.stderr)
+                except ValueError as exc:
+                    print(f"  WARNING: {exc}; skipping sTE variant", file=sys.stderr)
+                    recipient_cert_bytes = None
+            else:
+                print("  WARNING: MA cert download failed; skipping sTE variant",
+                      file=sys.stderr)
+        else:
+            print("  (trustedcerts/ra not readable; supply --recipient-cert for sTE)",
+                  file=sys.stderr)
     elif args.recipient_pub:
         recipient_pub = load_recipient_pub(args.recipient_pub)
         print("  WARNING: --recipient-pub used without --recipient-cert; "

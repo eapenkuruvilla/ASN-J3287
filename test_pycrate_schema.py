@@ -349,7 +349,10 @@ def compile_schemas(compile_text, make_GLOBAL, _ao):
     errors = []
     print("Step 1: Compiling schemas...")
     try:
-        compile_text(texts)
+        import io, contextlib
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            compile_text(texts)
         print("  Compilation: OK")
     except Exception as e:
         errors.append(("compile_text", str(e)))
