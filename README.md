@@ -234,6 +234,121 @@ dU       = (r + e × kU)  mod n              ← final signing scalar
 
 `create_mbr.py` auto-detects pseudonym vs RSU bundles and applies butterfly expansion accordingly.
 
+**Pseudonym bundle layout**
+
+| Path | Content |
+|------|---------|
+| `dwnl_sgn.priv` | Base signing key `sk_base` (raw 32-byte big-endian P-256 scalar) |
+| `sgn_expnsn.key` | Butterfly expansion seed (16-byte AES key); absent in RSU bundles |
+| `trustedcerts/rca` | Root CA (offline trust anchor; also the CRACA for CRL queries) |
+| `trustedcerts/pca` | Pseudonym Certificate Authority (signs leaf certs) |
+| `trustedcerts/ra` | RA certificate — `id` field carries the RA hostname per IEEE 1609.2.1 §7.6.3.10 |
+| `download/{i}/` | One subdirectory per i-period (hex) |
+| `download/{i}/{i}_{j}.cert` | Leaf pseudonym certificate for i-period `i`, j-index `j` |
+| `download/{i}/{i}_{j}.s` | Private key reconstruction value `r` for that cert (raw 32-byte scalar) |
+
+---
+
+#### Pseudonym Certificate — COER Structure (IEEE 1609.2 `CertificateBase`)
+
+A pseudonym certificate is an **implicit certificate**: no signature field, no standalone public key.  The device's public key is recovered from the cert at verification time via ECQV.
+
+**Outer envelope (96 bytes for ISS preprod)**
+
+```
+CertificateBase ::= SEQUENCE {
+  version    Uint8(3),
+  type       CertificateType,       -- explicit(0) | implicit(1)
+  issuer     IssuerIdentifier,      -- HashedId8 of the issuing PCA
+  toBeSigned ToBeSignedCertificate,
+  signature  Signature OPTIONAL     -- ABSENT for implicit certs
+}
+```
+
+| Byte offset | Field | Example value | Notes |
+|-------------|-------|---------------|-------|
+| 0 | COER preamble | `0x00` | Bit 7 = 0 → `signature` absent |
+| 1 | `version` | `3` | Always 3 for IEEE 1609.2 |
+| 2 | `type` | `1` | `implicit(1)` |
+| 3 | `issuer` tag | `0x80` | CHOICE `[0]` = `sha256AndDigest` |
+| 4–11 | `issuer` HashedId8 | `1631afb5fc255d0f` | SHA-256[-8:] of the issuing PCA cert; matches entry in trusted-cert HashedId8 table |
+| 12–95 | `toBeSigned` | 84 bytes | TBS bytes hashed for ECQV key reconstruction |
+
+**`toBeSigned` — `ToBeSignedCertificate`**
+
+```
+ToBeSignedCertificate ::= SEQUENCE {
+  id                   CertificateId,            -- linkageData for pseudonym certs
+  cracaId              HashedId3,                -- low-order 3 bytes of SHA-256(CRACA cert)
+  crlSeries            CrlSeries,                -- CRL series number (Uint16)
+  validityPeriod       ValidityPeriod,           -- start (Time32) + duration (CHOICE)
+  region               GeographicRegion OPTIONAL,
+  assuranceLevel       SubjectAssurance OPTIONAL,
+  appPermissions       SequenceOfPsidSsp OPTIONAL,-- PSIDs this cert may sign for
+  ...
+  verifyKeyIndicator   VerificationKeyIndicator  -- reconstructionValue for implicit certs
+}
+```
+
+The COER preamble byte for `ToBeSignedCertificate` is a bitmask encoding which OPTIONAL fields are present.  For the ISS preprod pseudonym cert (`0x50` = `0b01010000`):
+
+| Preamble bit | Field | Present? |
+|--------------|-------|----------|
+| 7 | extensions | No |
+| 6 | `region` | **Yes** |
+| 5 | `assuranceLevel` | No |
+| 4 | `appPermissions` | **Yes** |
+| 3 | `certIssuePermissions` | No |
+| 2 | `certRequestPermissions` | No |
+| 1 | `canRequestRollover` | No |
+| 0 | `encryptionKey` | No |
+
+**Parsed field values (ISS preprod `249_0.cert`)**
+
+| Field | Value | Purpose |
+|-------|-------|---------|
+| `id` | `linkageData` (CHOICE tag `0x80`) | Identifies cert type as pseudonym (linkage-based) |
+| `id.iCert` | `585` (= `0x249`) | i-period index — matches directory name `249`; used to select correct leaf cert |
+| `id.linkage-value` | `8852d62cea96190742` | 9-byte value compared against CRL-derived value to detect revocation |
+| `id.group-linkage-value.jValue` | `00000000` | 4-byte j-group identifier (used for group revocation) |
+| `id.group-linkage-value.value` | `8852d62cea96190742` | Group linkage value |
+| `cracaId` | `5e6f5b` | Low-order 3 bytes of SHA-256(`trustedcerts/rca`); resolved to full HashedId8 for CRL query |
+| `crlSeries` | `1` | Used as `crlSeries` query parameter |
+| `validityPeriod.start` | `0x29ceef95` ≈ 2026-04-03 | TAI seconds since 2004-01-01 |
+| `validityPeriod.duration` | 169 hours (≈ 7 days) | Typical pseudonym cert lifetime |
+| `region` | `identifiedRegion { countryOnly: 840 }` | USA — cert valid only in the United States |
+| `appPermissions` | `psid=32` | Authorises signing of BasicSafetyMessages (PSID 32 = 0x20) |
+| `verifyKeyIndicator` | `reconstructionValue` (P-256 point `R`) | ECQV reconstruction value; used by verifier to recover sender's public key |
+
+**Relationship between cert fields and CRL query**
+
+```
+pseudonym cert
+  ├─ toBeSigned.id.linkageData.cracaId  = 5e6f5b  (HashedId3 — 3 bytes only)
+  │       │
+  │       └─ scan trustedcerts/: SHA-256(rca)[-3:] == 5e6f5b
+  │                → full HashedId8 = 93232614ee5e6f5b  (craca query param)
+  │
+  └─ toBeSigned.crlSeries = 1                          (crlSeries query param)
+
+GET /v3/crl?craca=93232614ee5e6f5b&crlSeries=1
+```
+
+**Relationship between cert fields and ECQV key reconstruction**
+
+```
+tbs_coer  = cert_bytes[12:]           (TBS as-encoded: skip 1-byte preamble +
+                                       1-byte version + 1-byte type + 9-byte issuer)
+e         = SHA-256( SHA-256(tbs_coer) ∥ SHA-256(issuer_cert_coer) )  mod n
+kU        = (sk_base + f_k(iCert, jIndex)) mod n    ← butterfly expansion
+                                                       (iCert and jIndex from filename)
+dU        = (r + e × kU)  mod n                     ← final signing scalar
+```
+
+The filename `{i}_{j}.cert` directly encodes `iCert` (i-period, hex) and `j` (leaf index within that i-period), which together drive the butterfly KDF `f_k`.
+
+---
+
 ### Obtaining the MA Certificate from an RA (IEEE 1609.2.1 §6.3.5.13)
 
 IEEE 1609.2.1-2022 §6.3.5.13 defines a standard REST endpoint for downloading the MA certificate:
@@ -444,7 +559,7 @@ linkage_value = AES-128-ECB(key=seed1, data=i_padded_16_bytes)
               [first 9 bytes]
 ```
 
-The derived value is compared against the `linkage-value` field embedded in each pseudonym certificate (`toBeSigned.id.linkageData.linkage-value`).
+The derived value is compared against the `toBeSigned.id.linkageData.linkage-value` field (9 bytes) embedded in each pseudonym certificate.  See [Pseudonym Certificate — COER Structure](#pseudonym-certificate--coer-structure-ieee-16092-certificatebase) for a full field-by-field breakdown.
 
 The CRL is downloaded from the RA identified in the bundle's `trustedcerts/ra` certificate — the RA certificate's `id` field contains the RA hostname per IEEE 1609.2.1 §7.6.3.10, so no manual URL configuration is needed.
 
@@ -454,12 +569,12 @@ The CRL is downloaded from the RA identified in the bundle's `trustedcerts/ra` c
 GET https://{ra-hostname}/v3/crl?craca={cracaId}&crlSeries={n}
 ```
 
-| Parameter | Source | Example |
-|-----------|--------|---------|
-| `craca` | SHA-256 of CRACA cert (low-order 8 bytes = HashedId8), 16-char hex | `93232614ee5e6f5b` |
-| `crlSeries` | `toBeSigned.crlSeries` field of any pseudonym cert | `1` |
+| Parameter | Source in pseudonym cert | Example |
+|-----------|--------------------------|---------|
+| `craca` | `toBeSigned.cracaId` (HashedId3, 3 bytes) → resolved to full HashedId8 by scanning `trustedcerts/` | `93232614ee5e6f5b` |
+| `crlSeries` | `toBeSigned.crlSeries` (Uint16) | `1` |
 
-`cracaId` in the pseudonym certificate is only 3 bytes (HashedId3).  The script identifies the full CRACA cert by hashing each file in `trustedcerts/` and matching the low-order 3 bytes; for the ISS preprod bundle the CRACA is the root CA (`trustedcerts/rca`).
+`cracaId` in the pseudonym cert is only 3 bytes (HashedId3 = low-order 3 bytes of SHA-256 of the CRACA cert).  The script identifies the full CRACA cert by hashing each file in `trustedcerts/` and matching those 3 bytes; for the ISS preprod bundle the CRACA is the root CA (`trustedcerts/rca`).
 
 #### Usage
 
