@@ -430,6 +430,123 @@ python3 decode_mbr.py coer/out_plaintext.coer
 python3 decode_mbr.py coer/out_signed.coer
 ```
 
+### CRL Revocation Check — `check_crl.py`
+
+Downloads the IEEE 1609.2 Certificate Revocation List from the SCMS RA and checks whether any pseudonym certificates in a local bundle appear in it.  Used to verify that the MA has acted on submitted MBRs by revoking the misbehaving device's pseudonym certificates.
+
+#### Background
+
+Pseudonym certificates in the ISS SCMS use **linkage-based revocation** (IEEE 1609.2 §7.3.7).  The CRL does not list certificate hashes; instead it publishes cryptographic seeds (`linkageSeed1`, `linkageSeed2`) from which the linkage value for each revoked device at a given i-period can be derived:
+
+```
+linkage_value = AES-128-ECB(key=seed1, data=i_padded_16_bytes)
+              ⊕ AES-128-ECB(key=seed2, data=i_padded_16_bytes)
+              [first 9 bytes]
+```
+
+The derived value is compared against the `linkage-value` field embedded in each pseudonym certificate (`toBeSigned.id.linkageData.linkage-value`).
+
+The CRL is downloaded from the RA identified in the bundle's `trustedcerts/ra` certificate — the RA certificate's `id` field contains the RA hostname per IEEE 1609.2.1 §7.6.3.10, so no manual URL configuration is needed.
+
+#### CRL query parameters (IEEE 1609.2.1 §6.3.5.10)
+
+```
+GET https://{ra-hostname}/v3/crl?craca={cracaId}&crlSeries={n}
+```
+
+| Parameter | Source | Example |
+|-----------|--------|---------|
+| `craca` | SHA-256 of CRACA cert (low-order 8 bytes = HashedId8), 16-char hex | `93232614ee5e6f5b` |
+| `crlSeries` | `toBeSigned.crlSeries` field of any pseudonym cert | `1` |
+
+`cracaId` in the pseudonym certificate is only 3 bytes (HashedId3).  The script identifies the full CRACA cert by hashing each file in `trustedcerts/` and matching the low-order 3 bytes; for the ISS preprod bundle the CRACA is the root CA (`trustedcerts/rca`).
+
+#### Usage
+
+```bash
+python3 check_crl.py \
+    --certs-dir <bundle-dir> \
+    [--api-key "<x-virtual-api-key>"] \
+    [--save-crl /tmp/crl.coer] \
+    [--load-crl /tmp/crl.coer]   # offline re-check without re-downloading
+```
+
+The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` if needed.
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| `--api-key` | optional | `x-virtual-api-key` token; required by ISS RA, not required by SaeSol RA |
+| `--certs-dir` | **required** | Pseudonym bundle root (must contain `download/` and `trustedcerts/`) |
+| `--ra-url` | auto from `trustedcerts/ra` cert | Override RA base URL |
+| `--craca-hex` | auto from `trustedcerts/` | HashedId8 of CRACA cert (16 hex chars) |
+| `--crl-series` | auto from cert | CRL series number |
+| `--save-crl` | — | Save raw downloaded CRL bytes to file |
+| `--load-crl` | — | Load CRL from file instead of downloading |
+
+#### Observed output (ISS preprod, April 2026)
+
+```
+[4] Downloading CRL from https://ra.preprod.v2x.isscms.com ...
+  GET https://ra.preprod.v2x.isscms.com/v3/crl?craca=93232614ee5e6f5b&crlSeries=1 → 200
+  Downloaded 132 bytes
+
+[5] Parsing CRL ...
+  CRL type    : fullLinkedCrl
+  issueDate   : 702679996
+  nextCrl     : 703242005
+  iRev        : 587  (0x24B)
+  individual  : 1 JMaxGroup(s)
+  groups      : 0 GroupCrlEntry(s)
+
+[6] Checking revocation ...
+  NOT REVOKED: 0 of 400 pseudonym certificates appear in the CRL
+```
+
+**Interpretation:**
+
+| CRL field | Value | Meaning |
+|-----------|-------|---------|
+| `fullLinkedCrl` | — | Linkage-based full CRL (pseudonym certs) |
+| `iRev = 587` (0x24B) | — | CRL covers i-period 587; bundle spans 0x249–0x25C so this is within range |
+| `individual: 1 JMaxGroup` | — | **One device has been revoked by the MA** — the revocation pipeline is working |
+| NOT REVOKED | — | The revoked device is not the test bundle; different linkage seeds expand to a different linkage value |
+
+#### End-to-end revocation verification procedure
+
+To verify the full MBR → MA → CRL pipeline:
+
+1. **Generate a BSM** from the pseudonym bundle being tested:
+   ```bash
+   python3 create_mbr.py \
+       --bsm coer/bad_accel_iss_key.coer \
+       --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
+       --recipient-cert certs/ISS/ma_keys/iss_ma_public_key.cert \
+       --out-dir coer/
+   ```
+
+2. **Upload the signed+encrypted MBR** to the MA via the RA (`POST /v3/misbehavior-report`).  Repeat with multiple reports — the MA applies a threshold before triggering revocation.
+
+3. **Wait** for the MA to process reports and issue a new CRL.  `nextCrl` in the CRL gives the expected refresh time (Unix TAI seconds; subtract 37 for UTC).
+
+4. **Re-check the CRL**:
+   ```bash
+   python3 check_crl.py --api-key "<key>"
+   ```
+   When the MA revokes the device, the `individual` entry count increases and `NOT REVOKED` changes to `REVOKED`.
+
+5. **Confirm linkage value match** — the script computes:
+   ```
+   lv = AES-ECB(seed1, iRev) ⊕ AES-ECB(seed2, iRev)
+   ```
+   and compares against every cert's `linkage-value` field.  A match confirms the MA used the correct linkage data.
+
+#### Notes
+
+- **Multi-SCMS**: The CRACA is the root CA of the bundle's PKI chain.  Certs from a different SCMS (different root CA) have a different `cracaId` and belong to a different CRL series — check each SCMS's RA separately.
+- **Delta CRLs**: `deltaLinkedCrl` entries contain only revocations since the last full CRL.  The script handles both full and delta types.
+- **CRL refresh**: `nextCrl` is a Time32 (seconds since TAI epoch 2004-01-01; subtract 37 s for UTC).  The RA serves a new CRL approximately at that time.
+- **`iRev` vs `iCert`**: `iRev` in the CRL is the i-period for which revocation takes effect; it must match `iCert` in the pseudonym cert for the derived linkage value to be correct.
+
 ### pycrate Schema Compatibility — `test_pycrate_schema.py`
 
 Verifies that the `pycrate` library can compile and use all 29 schemas in `asn/J3287_ASN_flat/`, then attempts OER round-trip encode/decode on the key PDU types.
@@ -604,6 +721,7 @@ ASN1/
 ├── create_mbr.py           CLI entry point — cert selection, geolocation, main()
 ├── validate_mbr.py         Validate signed MBR via ISS SCMS virtual device API
 ├── decrypt_mbr.py          Decrypt sTE MBR via ISS SCMS virtual device API
+├── check_crl.py            Download IEEE 1609.2 CRL from RA and check pseudonym cert revocation
 ├── decode_j2735.py         J2735 MessageFrame UPER decoder
 ├── translate_asn1.py       Parameterized → flat ASN.1 translator
 ├── build_asn_lib.sh        Compile asn1c_code/ → lib/libasn1c.so
