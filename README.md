@@ -466,7 +466,7 @@ GET https://{ra-hostname}/v3/crl?craca={cracaId}&crlSeries={n}
 ```bash
 python3 check_crl.py \
     --certs-dir <bundle-dir> \
-    [--api-key "<x-virtual-api-key>"] \
+    --api-key "<x-virtual-api-key>" \
     [--save-crl /tmp/crl.coer] \
     [--load-crl /tmp/crl.coer]   # offline re-check without re-downloading
 ```
@@ -530,7 +530,9 @@ To verify the full MBR → MA → CRL pipeline:
 
 4. **Re-check the CRL**:
    ```bash
-   python3 check_crl.py --api-key "<key>"
+   python3 check_crl.py \
+       --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
+       --api-key "<key>"
    ```
    When the MA revokes the device, the `individual` entry count increases and `NOT REVOKED` changes to `REVOKED`.
 

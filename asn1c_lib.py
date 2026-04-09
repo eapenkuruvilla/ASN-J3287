@@ -12,7 +12,6 @@ Requires: lib/libasn1c.so  (run ./build_asn_lib.sh on the Ubuntu host to build i
 import ctypes
 import json
 import os
-import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_PATH   = os.path.join(SCRIPT_DIR, 'lib', 'libasn1c.so')
@@ -25,12 +24,10 @@ def _get_lib():
     if _lib is not None:
         return _lib
     if not os.path.exists(LIB_PATH):
-        print(
-            f"ERROR: {LIB_PATH} not found.\n"
-            "Run ./build_asn_lib.sh to compile the decoder library.",
-            file=sys.stderr,
+        raise RuntimeError(
+            f"{LIB_PATH} not found. "
+            "Run ./build_asn_lib.sh to compile the decoder library."
         )
-        sys.exit(1)
     lib = ctypes.CDLL(LIB_PATH)
 
     lib.decode_oer_to_jer.restype  = ctypes.c_int

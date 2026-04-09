@@ -61,7 +61,7 @@ def geolocate_ip() -> tuple:
         print("  (requests not installed; using lat=0 lon=0 elev=0)", file=sys.stderr)
         return 0, 0, 0
     try:
-        resp = _requests.get("http://ip-api.com/json/", timeout=5)
+        resp = _requests.get("https://ip-api.com/json/", timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") != "success":
@@ -178,27 +178,40 @@ def load_signing_key(path: str, bundle_dir: str = None):
             kU = sk_base
 
         # Correct e: SHA-256( SHA-256(COER(TBS)) || SHA-256(issuer_cert) ) mod n
+        # Extract TBS bytes directly from cert_bytes — no re-encode round-trip.
+        # IEEE 1609.2 CertificateBase COER (AUTOMATIC TAGS):
+        #   preamble(1) | version(1) | type(1) | issuer(tag(1)+data) | TBS...
+        # For implicit certs preamble bit7 = 0 (signature absent) → TBS extends to EOF.
+        if cert_bytes[0] & 0x80:
+            raise RuntimeError(
+                f"Explicit cert with signature present in {cert_path}: "
+                "cannot extract TBS without parsing signature length")
+        _issuer_tag = cert_bytes[3]
+        if _issuer_tag == 0x80:    # sha256AndDigest: HashedId8 = 8 bytes
+            _tbs_offset = 12       # 1+1+1+1+8
+        elif _issuer_tag == 0x82:  # sha384AndDigest: HashedId12 = 12 bytes
+            _tbs_offset = 16       # 1+1+1+1+12
+        else:
+            raise RuntimeError(
+                f"Unsupported issuer tag 0x{_issuer_tag:02X} in {cert_path}: "
+                "cannot locate TBS offset")
+        tbs_coer = cert_bytes[_tbs_offset:]
+
         cert_dict = decode_oer("Certificate", cert_bytes)
-        tbs_coer = encode_jer("ToBeSignedCertificate", cert_dict["toBeSigned"])
         issuer_info = cert_dict.get("issuer", {})
         issuer_hid8_hex = (issuer_info.get("sha256AndDigest")
                            or issuer_info.get("sha384AndDigest"))
-        if issuer_hid8_hex:
-            try:
-                issuer_cert_coer = _find_issuer_cert_coer(
-                    bundle_dir, bytes.fromhex(issuer_hid8_hex))
-                e = int.from_bytes(
-                    hashlib.sha256(
-                        hashlib.sha256(tbs_coer).digest() +
-                        hashlib.sha256(issuer_cert_coer).digest()
-                    ).digest(), 'big'
-                ) % _N
-            except RuntimeError as exc:
-                print(f"  WARNING: {exc}; falling back to SHA256(cert) for e",
-                      file=sys.stderr)
-                e = int.from_bytes(hashlib.sha256(cert_bytes).digest(), 'big') % _N
-        else:
-            e = int.from_bytes(hashlib.sha256(cert_bytes).digest(), 'big') % _N
+        if not issuer_hid8_hex:
+            raise RuntimeError(
+                f"Cannot reconstruct ECQV key: missing issuer HashedId8 in {cert_path}")
+        issuer_cert_coer = _find_issuer_cert_coer(
+            bundle_dir, bytes.fromhex(issuer_hid8_hex))
+        e = int.from_bytes(
+            hashlib.sha256(
+                hashlib.sha256(tbs_coer).digest() +
+                hashlib.sha256(issuer_cert_coer).digest()
+            ).digest(), 'big'
+        ) % _N
 
         scalar = (r + (e * kU) % _N) % _N
         return ec.derive_private_key(scalar, ec.SECP256R1(), default_backend())
