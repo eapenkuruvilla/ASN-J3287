@@ -194,7 +194,7 @@ signer: digest  →  HashedId8 of OBU pseudonym cert
                    ISS or SaeSol
 ```
 
-When a full-cert BSM is received the RSU should cache both the cert bytes and the derived provider against the leaf cert's HashedId8, so that subsequent `digest`-only BSMs from the same OBU resolve to a provider in one step.
+When a full-cert BSM is received the RSU should cache the cert bytes against the leaf cert's HashedId8, so that subsequent `digest`-only BSMs from the same OBU can recover the full cert. The provider (SCMS operator) is then derived from `cert_bytes[4:12]` — the `issuer.sha256AndDigest` field at the fixed COER offset for implicit certs — looked up in the table below.
 
 When a `certificate` BSM is received, scan the raw COER bytes for the known PCA/ICA/RCA HashedId8 values:
 
@@ -213,7 +213,7 @@ When a `certificate` BSM is received, scan the raw COER bytes for the known PCA/
 
 The MA requires the full certificate of the misbehaving device in the MBR evidence to perform remediation (e.g. certificate revocation). If the misbehaving BSM carries only a `digest`, the RSU must substitute the full cert before embedding it as evidence:
 
-1. When any BSM with `signer: certificate` is received, cache `HashedId8 → (cert_bytes, provider)`.
+1. When any BSM with `signer: certificate` is received, cache `HashedId8 → cert_bytes`.
 2. When building an MBR, if the evidence BSM has `signer: digest`, look up the HashedId8 in the cache and replace `digest` with `certificate`.
 3. This substitution is **signature-preserving** — `SignerIdentifier` is outside the signed scope (`ToBeSignedData`) in IEEE 1609.2.
 4. If the cache has no entry for the digest (misbehavior detected on the very first BSM from that OBU), embed the BSM as-is; the MA will need to retrieve the cert through other means.
