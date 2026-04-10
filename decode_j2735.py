@@ -64,12 +64,13 @@ def load_j2735():
     import importlib.util, tempfile
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as tmp:
         tmp_path = tmp.name
-    generate_modules(PycrateGenerator, destfile=tmp_path)
-
-    spec = importlib.util.spec_from_file_location("_j2735_rt", tmp_path)
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    os.unlink(tmp_path)
+    try:
+        generate_modules(PycrateGenerator, destfile=tmp_path)
+        spec = importlib.util.spec_from_file_location("_j2735_rt", tmp_path)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        os.unlink(tmp_path)
 
     return mod.MessageFrame.MessageFrame
 

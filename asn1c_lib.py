@@ -12,6 +12,8 @@ Requires: lib/libasn1c.so  (run ./build_asn_lib.sh on the Ubuntu host to build i
 import ctypes
 import json
 import os
+import pathlib
+import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_PATH   = os.path.join(SCRIPT_DIR, 'lib', 'libasn1c.so')
@@ -55,6 +57,40 @@ def _get_lib():
 
     _lib = lib
     return _lib
+
+
+def ra_url_from_bundle(bundle_dir: str) -> str | None:
+    """Return the RA URL from the RA certificate found in a bundle directory.
+
+    IEEE 1609.2.1 §7.6.3.10: the RA certificate's toBeSigned.id.name field
+    holds the RA identifying URL.
+
+    Searches in order:
+      1. <bundle_dir>/trustedcerts/ra          (flat / pseudonym layout)
+      2. <bundle_dir>/rsu-*/trustedcerts/ra    (RSU bundle layout)
+      3. <bundle_dir>/download/trustedcerts/ra (pseudonym bundle variant)
+
+    Returns the URL (e.g. ``https://ra.example.com``) from the first readable
+    file, or None if no suitable cert is found.
+    """
+    root = pathlib.Path(bundle_dir)
+    candidates = [root / "trustedcerts" / "ra"]
+    for p in sorted(root.glob("rsu-*/trustedcerts/ra")):
+        candidates.append(p)
+    candidates.append(root / "download" / "trustedcerts" / "ra")
+
+    for ra_path in candidates:
+        if not ra_path.exists():
+            continue
+        try:
+            cert_dict = decode_oer("Certificate", ra_path.read_bytes())
+            hostname = cert_dict.get("toBeSigned", {}).get("id", {}).get("name")
+            if hostname:
+                return f"https://{hostname}"
+        except Exception as exc:
+            print(f"  [ra_url_from_bundle] {ra_path}: {exc}", file=sys.stderr)
+
+    return None
 
 
 def decode_oer(pdu_name: str, data: bytes) -> dict:

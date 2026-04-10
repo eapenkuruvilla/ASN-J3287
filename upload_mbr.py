@@ -79,39 +79,15 @@ def detect_content_type(mbr_bytes: bytes) -> tuple[str, str]:
 
 
 def mur_url_from_cert(certs_dir: str) -> str | None:
+    """Return the MUR URL from the RA certificate in the bundle directory.
+
+    Delegates to asn1c_lib.ra_url_from_bundle(); prints a message when not found.
     """
-    IEEE 1609.2.1 §7.6.3.10: the RA certificate's toBeSigned.id.name field
-    is the RA identifying URL.
-
-    Searches in order:
-      1. <certs_dir>/trustedcerts/ra          (flat / pseudonym layout)
-      2. <certs_dir>/rsu-*/trustedcerts/ra    (RSU bundle layout)
-      3. <certs_dir>/download/trustedcerts/ra (pseudonym bundle variant)
-    Returns the URL from the first readable file.
-    """
-    import glob as _glob
-    import pathlib
-
-    root = pathlib.Path(certs_dir)
-    candidates = [root / "trustedcerts" / "ra"]
-    for p in sorted(root.glob("rsu-*/trustedcerts/ra")):
-        candidates.append(p)
-    candidates.append(root / "download" / "trustedcerts" / "ra")
-
-    for ra_path in candidates:
-        if not ra_path.exists():
-            continue
-        try:
-            from asn1c_lib import decode_oer
-            cert_dict = decode_oer("Certificate", ra_path.read_bytes())
-            hostname = cert_dict.get("toBeSigned", {}).get("id", {}).get("name")
-            if hostname:
-                return f"https://{hostname}"
-        except Exception as exc:
-            print(f"  [mur_url_from_cert] {ra_path}: {exc}", file=sys.stderr)
-
-    print(f"  trustedcerts/ra not found in {certs_dir}", file=sys.stderr)
-    return None
+    from asn1c_lib import ra_url_from_bundle
+    url = ra_url_from_bundle(certs_dir)
+    if url is None:
+        print(f"  trustedcerts/ra not found in {certs_dir}", file=sys.stderr)
+    return url
 
 
 def upload_mbr(mur_url: str, service: str, mbr_bytes: bytes,

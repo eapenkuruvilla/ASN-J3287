@@ -155,41 +155,12 @@ def parse_cert(cert_bytes: bytes) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def ra_url_from_cert(certs_dir: str) -> str | None:
-    """
-    IEEE 1609.2.1 §7.6.3.10: the RA certificate's toBeSigned.id field SHALL be
-    of type name and SHALL equal the RA identifying URL.
+    """Return the RA URL from the RA certificate in the bundle directory.
 
-    Searches in order:
-      1. <certs_dir>/trustedcerts/ra          (flat / pseudonym layout)
-      2. <certs_dir>/rsu-*/trustedcerts/ra    (RSU bundle layout)
-      3. <certs_dir>/download/trustedcerts/ra (pseudonym bundle variant)
-    Returns the URL from the first readable file.
+    Delegates to asn1c_lib.ra_url_from_bundle().
     """
-    import pathlib
-    root = pathlib.Path(certs_dir)
-    candidates = [root / "trustedcerts" / "ra"]
-    for p in sorted(root.glob("rsu-*/trustedcerts/ra")):
-        candidates.append(p)
-    candidates.append(root / "download" / "trustedcerts" / "ra")
-
-    mod = _get_pycrate_mod()
-    if mod is None:
-        return None
-    for ra_path in candidates:
-        if not ra_path.exists():
-            continue
-        try:
-            Cert = mod.Ieee1609Dot2.Certificate
-            data = ra_path.read_bytes()
-            Cert.from_oer(data)
-            v = Cert.get_val()
-            cert_id = v.get("toBeSigned", {}).get("id", [None, None])
-            if isinstance(cert_id, (list, tuple)) and cert_id[0] == "name":
-                hostname = cert_id[1]
-                return f"https://{hostname}"
-        except Exception as e:
-            print(f"  [ra_url_from_cert] {ra_path}: {e}")
-    return None
+    from asn1c_lib import ra_url_from_bundle
+    return ra_url_from_bundle(certs_dir)
 
 
 def find_craca(certs_dir: str) -> tuple[str, bytes] | tuple[None, None]:
