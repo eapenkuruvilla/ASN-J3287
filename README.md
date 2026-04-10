@@ -44,7 +44,7 @@ python3 create_mbr.py \
     [--recipient-pub <hex>]         # Recipient P-256 public key (64–65 bytes hex) — enables out_ste.coer (no cert → non-compliant P1/recipientId)
     [--encrypt-api-key <token>]     # ISS virtual-device token for API-based encryption (rekRecipInfo)
     [--encrypt-recipient-id <id>]   #   Device ID to encrypt to (required with --encrypt-api-key)
-    [--out-dir coer/]               # Output directory (default: coer/)
+    [--out-dir output/]               # Output directory (default: coer/)
     [--psid 38]                     # PSID for headerInfo (default: 38 = MBR)
     [--lat <int>]                   # observationLocation latitude in 1e-7 deg units (default: IP geolocation)
     [--lon <int>]                   # observationLocation longitude in 1e-7 deg units (default: IP geolocation)
@@ -64,7 +64,7 @@ python3 create_mbr.py \
 ```bash
 python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 **Example — signed via ISS virtual device API:**
@@ -73,7 +73,7 @@ python3 create_mbr.py \
 python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --sign-api-key "<x-virtual-api-key token>" \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 > **Note:** The ISS API adds `generationTime` and `expiryTime` to `headerInfo`, which violates the `SaeJ3287Mbr-Signed` absence constraints. The ISS validate API accepts this, but strict ASN.1 decoders (e.g. the ISS C# decoder) will reject it with "Absence constraint violated". Use local ECQV signing (`--certs-dir`) to produce a fully conformant `out_signed.coer`.
@@ -84,7 +84,7 @@ python3 create_mbr.py \
 python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/application/e0c324c643aca860 \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 The currently valid RSU certificate is selected automatically from `rsu-*/downloadFiles/`.
@@ -95,7 +95,7 @@ The currently valid RSU certificate is selected automatically from `rsu-*/downlo
 python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 **Example — signed with local ECQV key reconstruction (SaeSol RSU bundle):**
@@ -104,7 +104,7 @@ python3 create_mbr.py \
 python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/SaeSol/application/b831f0c528d4c4a3 \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 **Example — signed with local ECQV + butterfly expansion (SaeSol pseudonym/OBU bundle):**
@@ -113,7 +113,7 @@ python3 create_mbr.py \
 python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/SaeSol/pseudonym/63efb57ac6280708 \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 The bundle layout is detected automatically (`download/` subdir present → pseudonym). The currently valid pseudonym cert is selected; butterfly key expansion is applied using `sgn_expnsn.key`.
@@ -399,7 +399,7 @@ python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/application/e0c324c643aca860 \
     --recipient-cert certs/ma_keys/iss_ma_public_key.cert \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 Or with the SaeSol MA cert:
@@ -409,7 +409,7 @@ python3 create_mbr.py \
     --bsm coer/bad_accel_iss_key.coer \
     --certs-dir certs/ISS/application/e0c324c643aca860 \
     --recipient-cert certs/ma_keys/saesol_ma_public_key.cert \
-    --out-dir coer/
+    --out-dir output/
 ```
 
 > **Note:** `--sign-api-key` may be substituted for `--certs-dir` above, but the ISS API adds `generationTime`/`expiryTime` to `headerInfo` making the inner signed payload non-conformant with `SaeJ3287Mbr-Signed` absence constraints.
@@ -543,11 +543,42 @@ python3 create_mbr.py \
     --sign-api-key "<token>" \
     --encrypt-api-key "<token>" \
     --encrypt-recipient-id "<device-id>" \
-    --out-dir coer/
+    --out-dir output/
 
 # 2. Decrypt it back
 python3 decrypt_mbr.py coer/out_ste.coer --api-key "<token>"
 ```
+
+### Generate Faulty BSM — `faulty-bsm-generator`
+
+Generates IEEE 1609.2-signed BSMs with injected misbehavior faults (e.g. `perturb_acceleration`, `perturb_security_message_inc_with_ssp`). Signs with a pseudonym cert from a local SCMS bundle via ECQV + butterfly key expansion.
+
+```
+faulty-bsm-generator/src/test_faultybsm.py
+  --input_file <path>       Input BSM binary (bare filename → data/example_IEEE/<name>,
+                             or full/relative path used as-is)
+  --repeat_files <n>        Number of output BSMs to generate (default: 20)
+  --output_codec COER|PER|JER
+  --fault <name>            Fault to inject (default: perturb_security_message_inc_with_ssp)
+  --certs-dir <path>        Pseudonym bundle directory (e.g. certs/ISS/pseudonym/9b09e9e5e5c99a9e)
+  --out-dir <path>          Output directory (default: output/)
+  --seed <int>              NumPy random seed for reproducibility (default: 2026)
+  --bundle <hex>            Legacy: bundle digest under ./data/keys/ (ignored when --certs-dir set)
+```
+
+**Example:**
+
+```bash
+python3 faulty-bsm-generator/src/test_faultybsm.py \
+    --input_file faulty-bsm-generator/data/example_IEEE/bsmLogDuringEvent_1582235120_fe80__14dd_f8ff_fe5b_bac3.bin_no_header \
+    --repeat_files 1 \
+    --output_codec COER \
+    --fault perturb_acceleration \
+    --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
+    --out-dir output/
+```
+
+Output files: `<out-dir>/encoded_out_<id>` (one per generated BSM).
 
 ### Decode J2735 BSM — `decode_j2735.py`
 
@@ -677,20 +708,35 @@ The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` 
 | `iRev = 587` | — | CRL covers i-period 587; bundle spans 0x249–0x25C so this is within range |
 | `indexWithinI = 0` | — | First CRL issued for this (CRACA, crlSeries, iRev) combination; increments on each revocation-triggered re-issuance within the same i-period |
 | `nextCrl` | — | Scheduled i-period rollover — **not** the only update point; the MA reissues the CRL immediately on each revocation event, incrementing `indexWithinI` |
-| `individual: 1 JMaxGroup` | — | **One device has been revoked by the MA** — the revocation pipeline is working |
-| NOT REVOKED | — | The revoked device is not the test bundle; different linkage seeds expand to a different linkage value |
+| `individual: 1 JMaxGroup` | — | CRL skeleton present: LA group structure (`la1Id`, `la2Id`, `iMax`) returned, but `seeds=0` |
+| NOT REVOKED | — | ISS's public `/v3/crl` endpoint returns a **skeleton CRL** — the `IndividualRevocation` seed pairs are absent (see note below) |
+
+> **ISS skeleton CRL issue:** ISS's public `/v3/crl` endpoint returns the CRL grouping structure (`JMaxGroup → LAGroup → IMaxGroup`) with `la1Id`, `la2Id`, and `iMax` populated, but the `IndividualRevocation` seed pairs (`linkageSeed1`, `linkageSeed2`) are absent (`seeds=0`). Without the combined seeds, linkage value computation is impossible and no device can ever appear as REVOKED from this endpoint.
+>
+> Per IEEE 1609.2.1-2022 §6.3.5.8/§6.3.5.10 (CRL download APIs), the RA is responsible for combining the two LA halves and distributing the complete CRL to all parties — including vehicles with no ISS credentials. IEEE 1609.2-2022 §7.3 defines the `IndividualRevocation` data structure as containing both `linkageSeed1` and `linkageSeed2`; if those fields are absent, the CRL is structurally valid per ASN.1 (`SIZE(0..MAX)`) but operationally useless for revocation checking. A vehicle receiving a BSM must be able to check the signer's linkage value against the CRL independently. ISS's current public endpoint does not satisfy this requirement.
+>
+> `indexWithinI` incrementing confirms revocations have occurred; the seeds simply are not exposed via the unauthenticated endpoint. An authenticated endpoint or an alternative distribution channel (e.g. DSRC broadcast) may carry the complete CRL.
 
 #### End-to-end revocation verification procedure
 
 To verify the full MBR → MA → CRL pipeline:
 
-1. **Generate a BSM** from the pseudonym bundle being tested:
+1. **Generate a faulty BSM** signed with a pseudonym cert from the bundle being tested, then wrap it as an MBR:
    ```bash
-   python3 create_mbr.py \
-       --bsm coer/bad_accel_iss_key.coer \
+   # Step 1a — produce a faulty BSM signed with a pseudonym cert
+   python3 faulty-bsm-generator/src/test_faultybsm.py \
+       --input_file faulty-bsm-generator/data/example_IEEE/bsmLogDuringEvent_1582235120_fe80__14dd_f8ff_fe5b_bac3.bin_no_header \
+       --repeat_files 1 \
+       --output_codec COER \
+       --fault perturb_acceleration \
        --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
-       --recipient-cert certs/ISS/ma_keys/iss_ma_public_key.cert \
-       --out-dir coer/
+       --out-dir output/
+   # Step 1b — wrap the faulty BSM as a signed+encrypted MBR
+   # (MA cert is auto-downloaded from the RA identified in the bundle)
+   python3 create_mbr.py \
+       --bsm coer/encoded_out_0 \
+       --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
+       --out-dir output/
    ```
 
 2. **Upload the signed+encrypted MBR** to the MUR via `upload_mbr.py`.  Repeat with multiple reports — the MA applies a threshold before triggering revocation.
@@ -933,6 +979,8 @@ Verified against IEEE Std 1609.2-2022. The local ECQV signing path (`--certs-dir
 | # | Issue | Severity | Affected output |
 |---|-------|----------|----------------|
 | 1 | **ECIES P1 / recipientId require cert bytes** — when `--recipient-pub` is used without `--recipient-cert`, KDF2 P1 = `b""` and recipientId = 8 zero bytes. Use `--recipient-cert <ma.cert>` to produce standard-compliant output. | Low (use `--recipient-cert`) | `out_ste.coer` |
+| 2 | **ISS public CRL endpoint returns skeleton only** — `/v3/crl` returns the `JMaxGroup → LAGroup → IMaxGroup` structure with `la1Id`, `la2Id`, and `iMax` populated but `IndividualRevocation` seed pairs absent (`seeds=0`). Linkage-based revocation checking (`check_crl.py`) cannot detect REVOKED devices from this endpoint. Per IEEE 1609.2.1-2022 §6.3.5.8/§6.3.5.10 the RA must combine LA1+LA2 seeds before distributing the CRL. | High (standard non-conformance) | `check_crl.py` |
+| 3 | **BSM evidence has `signer: digest`** — `test_faultybsm.py` output BSMs carry `signer: digest` (HashedId8 only). The MA needs the full cert to identify and revoke the device. `create_mbr.py` does not substitute the full cert (`signer: certificate`) before embedding the BSM as MBR evidence. | Medium (cert hydration not implemented) | `out_ste.coer` evidence field |
 
 ## MA Encryption Key Selection — Cross-PKI Analysis
 

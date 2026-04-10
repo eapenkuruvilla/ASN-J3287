@@ -10,7 +10,7 @@ Usage:
         [--recipient-cert <ma.cert>]      # certRecipInfo encryption to MA cert
         [--encrypt-api-key <token>        # rekRecipInfo encryption via ISS API
          --encrypt-recipient-id <id>]
-        [--out-dir coer/]
+        [--out-dir output/]
 
 The script reads the BSM, hard-codes a LongAcc-ValueTooLarge observation
 (tgtId=5, obsId=4), sets generationTime to the current TAI time, and
@@ -543,7 +543,7 @@ def main():
                    help="Device ID to encrypt to (required with --encrypt-api-key)")
     p.add_argument("--bsm", required=True,
                    help="Input BSM / SaeJ3287Mbr COER file")
-    p.add_argument("--out-dir", default="coer",
+    p.add_argument("--out-dir", default="output",
                    help="Output directory (default: coer/)")
     p.add_argument("--psid", type=int, default=38,
                    help="PSID for headerInfo (default: 38 = MBR)")

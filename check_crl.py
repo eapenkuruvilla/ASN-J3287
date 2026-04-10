@@ -649,6 +649,13 @@ def main():
                 return bytes(val)
             return b""
 
+        # Show LA identifiers, iMax, and seed availability for each entry.
+        def _id_hex(v):
+            if isinstance(v, (bytes, bytearray)): return v.hex()
+            if isinstance(v, str): return v.encode("latin-1").hex()
+            return repr(v)
+
+        total_seeds = 0
         entry_idx = 0
         for jmax_group in individual:
             if not isinstance(jmax_group, dict):
@@ -656,18 +663,31 @@ def main():
             for la_group in (jmax_group.get("contents") or []):
                 if not isinstance(la_group, dict):
                     continue
+                la1 = _id_hex(la_group.get("la1Id", b""))
+                la2 = _id_hex(la_group.get("la2Id", b""))
                 for imax_group in (la_group.get("contents") or []):
                     if not isinstance(imax_group, dict):
                         continue
-                    for ir in (imax_group.get("contents") or []):
+                    imax = imax_group.get("iMax", "?")
+                    seeds = imax_group.get("contents") or []
+                    total_seeds += len(seeds)
+                    print(f"    la1={la1}  la2={la2}  iMax={imax}  seeds={len(seeds)}")
+                    for ir in seeds:
                         if not isinstance(ir, dict):
                             continue
                         s1 = _lv_bytes(ir.get("linkageSeed1", b""))
                         s2 = _lv_bytes(ir.get("linkageSeed2", b""))
                         if len(s1) == 16 and len(s2) == 16:
                             lv = compute_linkage_value(s1, s2, i_rev)
-                            print(f"    [{entry_idx:3d}] i={i_rev}  lv={lv.hex()}")
+                            print(f"      [{entry_idx:3d}] i={i_rev}  lv={lv.hex()}")
                             entry_idx += 1
+
+        if individual and total_seeds == 0:
+            print(f"  WARNING: CRL skeleton only — linkage seeds absent.")
+            print(f"  The RA endpoint omits IndividualRevocation seed pairs.")
+            print(f"  Per IEEE 1609.2.1-2022 §6.3.5.8/§6.3.5.10, the RA combines")
+            print(f"  LA1+LA2 seeds before distributing a complete CRL to all parties.")
+            print(f"  Revocation checking via this public endpoint is not possible.")
 
     # ---- Step 6: check revocation ----
     print("\n[6] Checking revocation ...")
