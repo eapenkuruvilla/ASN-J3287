@@ -480,21 +480,59 @@ def _aes_ecb(key: bytes, plaintext: bytes) -> bytes:
     return enc.update(plaintext) + enc.finalize()
 
 
-def compute_linkage_value(seed1: bytes, seed2: bytes, i: int) -> bytes:
-    """
-    IEEE 1609.2 Annex B — compute linkage value from two 16-byte seeds and
-    the i-period value.
+def _evolve_seed(seed: bytes, la_id: bytes, steps: int) -> bytes:
+    """Forward-evolve a linkage seed by *steps* i-periods.
 
-    LV = AES-128-ECB(key=seed1, data=i_padded) XOR
-         AES-128-ECB(key=seed2, data=i_padded)
-
-    The resulting 16-byte XOR is truncated to 9 bytes (the linkage-value size).
+    IEEE 1609.2-2022 §5.1.3.4.6 (seedEvoFn1-sha256):
+        input  = la_id (2 B) || ls (16 B) || 0^112 (14 B)   [32 bytes total]
+        output = low-order 16 octets of SHA-256(input)
     """
-    i_padded = i.to_bytes(16, "big")
-    prf1 = _aes_ecb(seed1, i_padded)
-    prf2 = _aes_ecb(seed2, i_padded)
-    xored = bytes(a ^ b for a, b in zip(prf1, prf2))
-    return xored[:9]
+    for _ in range(steps):
+        sha_in = la_id + seed + b'\x00' * 14          # 2 + 16 + 14 = 32 bytes
+        seed = hashlib.sha256(sha_in).digest()[-16:]   # low-order 16 bytes
+    return seed
+
+
+def _plv(ls: bytes, la_id: bytes, j: int) -> bytes:
+    """Pre-linkage value — seed expansion function (lvGenFn1-aes128).
+
+    IEEE 1609.2-2022 §5.1.3.4.8:
+        data   = 0^80 (10 B) || la_id (2 B) || Uint32(j) (4 B)  [16 bytes]
+        output = AES-128(key=ls, data=data) XOR data              [16 bytes]
+    """
+    data = b'\x00' * 10 + la_id + j.to_bytes(4, "big")   # 16 bytes
+    enc = _aes_ecb(ls, data)
+    return bytes(a ^ b for a, b in zip(enc, data))        # Davies-Meyer XOR
+
+
+def compute_linkage_value(seed1: bytes, seed2: bytes,
+                          la1_id: bytes, la2_id: bytes,
+                          i_rev: int, i_cert: int, j: int) -> bytes:
+    """
+    IEEE 1609.2-2022 §5.1.3.4.2 — compute individual linkage value LV(i_cert, j).
+
+    1. Evolve each CRL seed from iRev to i_cert  (§5.1.3.4.6).
+    2. Compute pre-linkage values PLV1, PLV2      (§5.1.3.4.8).
+    3. LV = low-order 9 bytes of (PLV1 ⊕ PLV2).
+
+    Parameters
+    ----------
+    seed1, seed2 : 16-byte linkage seeds from the CRL (at iRev).
+    la1_id, la2_id : 2-byte Linkage Authority Identifiers (from LAGroup).
+    i_rev  : the CRL's iRev value.
+    i_cert : the certificate's iCert value (must be >= i_rev).
+    j      : certificate index within the i-period (0 … jMax-1).
+    """
+    if i_cert < i_rev:
+        raise ValueError(f"i_cert ({i_cert}) < i_rev ({i_rev}): "
+                         "cannot reverse-evolve a one-way hash chain")
+    steps = i_cert - i_rev
+    s1 = _evolve_seed(seed1, la1_id, steps)
+    s2 = _evolve_seed(seed2, la2_id, steps)
+    plv1 = _plv(s1, la1_id, j)
+    plv2 = _plv(s2, la2_id, j)
+    xored = bytes(a ^ b for a, b in zip(plv1, plv2))
+    return xored[-9:]                                     # low-order 9 bytes
 
 
 # ---------------------------------------------------------------------------
@@ -570,11 +608,21 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
         key = (cert.get("i_cert", 0), lv.hex() if lv else "")
         cert_lv_map[key] = cert
 
-    def _check_individual(seed1_bytes, seed2_bytes, i_rev_val):
-        computed = compute_linkage_value(seed1_bytes, seed2_bytes, i_rev_val)
-        key = (i_rev_val, computed.hex())
-        if key in cert_lv_map:
-            return cert_lv_map[key]
+    # Collect the distinct i_cert values we need to check (only >= iRev)
+    i_cert_values = sorted({c.get("i_cert", 0) for c in certs
+                            if c.get("i_cert", 0) >= i_rev})
+
+    def _check_individual(seed1_bytes, seed2_bytes, la1_id, la2_id,
+                          i_rev_val, jmax_val):
+        """Try every cert i_cert (>= iRev) × j (0…jMax-1) combination."""
+        for ic in i_cert_values:
+            for j in range(jmax_val):
+                computed = compute_linkage_value(seed1_bytes, seed2_bytes,
+                                                la1_id, la2_id,
+                                                i_rev_val, ic, j)
+                key = (ic, computed.hex())
+                if key in cert_lv_map:
+                    return cert_lv_map[key]
         return None
 
     def _bytes_of(val):
@@ -595,6 +643,8 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
         for la_group in la_groups:
             if not isinstance(la_group, dict):
                 continue
+            la1_id = _bytes_of(la_group.get("la1Id", b""))
+            la2_id = _bytes_of(la_group.get("la2Id", b""))
             imax_groups = la_group.get("contents", [])
             for imax_group in imax_groups:
                 if not isinstance(imax_group, dict):
@@ -607,7 +657,8 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
                     s1 = _bytes_of(ir.get("linkageSeed1", b""))
                     s2 = _bytes_of(ir.get("linkageSeed2", b""))
                     if len(s1) == 16 and len(s2) == 16:
-                        hit = _check_individual(s1, s2, i_rev)
+                        hit = _check_individual(s1, s2, la1_id, la2_id,
+                                               i_rev, jmax)
                         if hit:
                             revoked.append({**hit, "reason": "linkage-individual",
                                             "i_rev": i_rev, "j_idx": j_idx})
@@ -618,10 +669,14 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
         if not isinstance(group_entry, dict):
             continue
         imax = group_entry.get("iMax", 0)
+        la1_id = _bytes_of(group_entry.get("la1Id", b""))
+        la2_id = _bytes_of(group_entry.get("la2Id", b""))
         s1 = _bytes_of(group_entry.get("linkageSeed1", b""))
         s2 = _bytes_of(group_entry.get("linkageSeed2", b""))
         if len(s1) == 16 and len(s2) == 16:
-            hit = _check_individual(s1, s2, i_rev)
+            # Group revocation: no jMax in GroupCrlEntry; use j=0 only.
+            # (Full group-linkage checking against GroupLinkageValue is TODO.)
+            hit = _check_individual(s1, s2, la1_id, la2_id, i_rev, 1)
             if hit:
                 revoked.append({**hit, "reason": "linkage-group", "i_rev": i_rev})
 
@@ -849,26 +904,38 @@ def main():
         for jmax_group in individual:
             if not isinstance(jmax_group, dict):
                 continue
+            jmax_disp = jmax_group.get("jmax", 0)
             for la_group in (jmax_group.get("contents") or []):
                 if not isinstance(la_group, dict):
                     continue
                 la1 = _id_hex(la_group.get("la1Id", b""))
                 la2 = _id_hex(la_group.get("la2Id", b""))
+                la1_bytes = _lv_bytes(la_group.get("la1Id", b""))
+                la2_bytes = _lv_bytes(la_group.get("la2Id", b""))
                 for imax_group in (la_group.get("contents") or []):
                     if not isinstance(imax_group, dict):
                         continue
                     imax = imax_group.get("iMax", "?")
                     seeds = imax_group.get("contents") or []
                     total_seeds += len(seeds)
-                    print(f"    la1={la1}  la2={la2}  iMax={imax}  seeds={len(seeds)}")
+                    print(f"    la1={la1}  la2={la2}  iMax={imax}  jMax={jmax_disp}  seeds={len(seeds)}")
                     for ir in seeds:
                         if not isinstance(ir, dict):
                             continue
                         s1 = _lv_bytes(ir.get("linkageSeed1", b""))
                         s2 = _lv_bytes(ir.get("linkageSeed2", b""))
                         if len(s1) == 16 and len(s2) == 16:
-                            lv = compute_linkage_value(s1, s2, i_rev)
-                            print(f"      [{entry_idx:3d}] i={i_rev}  lv={lv.hex()}")
+                            # Show LV at j=0 for display (all jMax values
+                            # are checked during revocation in step 6)
+                            lv = compute_linkage_value(s1, s2, la1_bytes, la2_bytes,
+                                                       i_rev, i_rev, 0)
+                            parts = [f"[{entry_idx:3d}] i={i_rev} j=0 lv={lv.hex()}"]
+                            for ic in sorted({c.get("i_cert", 0) for c in certs
+                                              if c.get("i_cert", 0) > i_rev}):
+                                elv = compute_linkage_value(s1, s2, la1_bytes, la2_bytes,
+                                                            i_rev, ic, 0)
+                                parts.append(f"i={ic} lv={elv.hex()}")
+                            print(f"      {'  | '.join(parts)}")
                             entry_idx += 1
 
         if individual and total_seeds == 0:
