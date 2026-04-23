@@ -636,7 +636,13 @@ python3 decode_mbr.py coer/out_signed.coer
 
 ### CRL Revocation Check — `check_crl.py`
 
-Downloads the IEEE 1609.2 Certificate Revocation List from the SCMS RA and checks whether any pseudonym certificates in a local bundle appear in it.  Used to verify that the MA has acted on submitted MBRs by revoking the misbehaving device's pseudonym certificates.
+Downloads the IEEE 1609.2 Certificate Revocation List from the SCMS RA and checks whether pseudonym certificates are revoked.  Supports three modes:
+
+- **Bundle mode** (`--certs-dir`): checks all 400 pseudonym certificates in a local device bundle.
+- **BSM mode** (`--bsm`): extracts the signing certificate directly from a received BSM and checks only that one certificate — no local bundle needed.
+- **Cross-provider mode** (`--bsm --ctl`): as above, but resolves the CRACA from a downloaded Certificate Trust List (CTL) when the BSM was signed by a device from a different SCMS provider.
+
+Used to verify that the MA has acted on submitted MBRs by revoking the misbehaving device's pseudonym certificates.
 
 #### Background
 
@@ -650,42 +656,74 @@ linkage_value = AES-128-ECB(key=seed1, data=i_padded_16_bytes)
 
 The derived value is compared against the `toBeSigned.id.linkageData.linkage-value` field (9 bytes) embedded in each pseudonym certificate.  See [Pseudonym Certificate — COER Structure](#pseudonym-certificate--coer-structure-ieee-16092-certificatebase) for a full field-by-field breakdown.
 
-The CRL is downloaded from the RA identified in the bundle's `trustedcerts/ra` certificate — the RA certificate's `id` field contains the RA hostname per IEEE 1609.2.1 §7.6.3.10, so no manual URL configuration is needed.
-
 #### CRL query parameters (IEEE 1609.2.1 §6.3.5.10)
 
 ```
 GET https://{ra-hostname}/v3/crl?craca={cracaId}&crlSeries={n}
 ```
 
-| Parameter | Source in pseudonym cert | Example |
-|-----------|--------------------------|---------|
-| `craca` | `toBeSigned.cracaId` (HashedId3, 3 bytes) → resolved to full HashedId8 by scanning `trustedcerts/` | `93232614ee5e6f5b` |
-| `crlSeries` | `toBeSigned.crlSeries` (Uint16) | `1` |
+| Parameter | Source | Example |
+|-----------|--------|---------|
+| `craca` | `toBeSigned.cracaId` (HashedId3, 3 bytes) → resolved to HashedId8 via `trustedcerts/` or CTL | `93232614ee5e6f5b` |
+| `crlSeries` | `toBeSigned.crlSeries` in the pseudonym cert | `1` |
 
-`cracaId` in the pseudonym cert is only 3 bytes (HashedId3 = low-order 3 bytes of SHA-256 of the CRACA cert).  The script identifies the full CRACA cert by hashing each file in `trustedcerts/` and matching those 3 bytes; for the ISS preprod bundle the CRACA is the root CA (`trustedcerts/rca`).
+`cracaId` in the pseudonym cert is only 3 bytes (HashedId3 = low-order 3 bytes of SHA-256 of the CRACA cert).  The script identifies the full HashedId8 by hashing each file in `trustedcerts/` and matching those 3 bytes.  For cross-provider checking the CTL is searched instead (see below).
 
 #### Usage
 
+**Mode 1 — check own device bundle:**
 ```bash
 python3 check_crl.py \
-    --certs-dir <bundle-dir> \
-    [--api-key "<x-virtual-api-key>"] \
+    --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
     [--save-crl /tmp/crl.coer] \
-    [--load-crl /tmp/crl.coer]   # offline re-check without re-downloading
+    [--load-crl /tmp/crl.coer]
 ```
+The RA URL is auto-discovered from `trustedcerts/ra`.  Checks all certificates in `download/`.
 
-The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` if needed.
+**Mode 2 — check the signing cert from a received BSM (same SCMS provider):**
+```bash
+python3 check_crl.py \
+    --bsm coer/bad_accel_iss_key.coer \
+    --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
+```
+Extracts `signer.certificate[0]` from the BSM's `Ieee1609Dot2Data { signedData }`, checks only that one certificate.  `--certs-dir` provides `trustedcerts/` for RA URL and CRACA resolution; `download/` is not used.  Fails with a clear error if the signer uses a `digest` (no inline cert).
+
+**Mode 3 — check a BSM from a different SCMS provider:**
+```bash
+python3 check_crl.py \
+    --bsm coer/other_provider_bsm.coer \
+    --ctl ctl/20250813-production_ctl \
+    --ra-url https://ra.otherprovider.com
+```
+No `--certs-dir` required.  The CRACA is resolved by scanning the CTL's unsigned certificates (`MultiSignedCtl.unsigned`, a `SequenceOfCertificate` containing all approved RCA certs) for the one matching the BSM cert's `cracaId3`.  The RA URL must be supplied explicitly — it is not in the CTL (which contains only RCA and elector certs, not RA certs).
+
+> **Note on cross-provider RA URL:** Before reaching out to the other provider's RA directly, it is worth trying your own RA's composite CRL endpoint — `check_crl.py` already falls back to `/composite-crl` if the individual CRL endpoint returns 404.  IEEE 1609.2.1 §6.3.5.8 defines composite CRLs as an optional aggregation mechanism; support varies by provider.
 
 | Argument | Default | Notes |
 |----------|---------|-------|
-| `--api-key` | optional | `x-virtual-api-key` token; **not required** for the ISS or SaeSol CRL endpoint (public) — may be needed for other RA endpoints |
-| `--certs-dir` | **required** | Pseudonym bundle root (must contain `download/` and `trustedcerts/`) |
-| `--ra-url` | auto from `trustedcerts/ra` cert | Override RA base URL |
-| `--craca-hex` | auto from `trustedcerts/` | HashedId8 of CRACA cert (16 hex chars) |
-| `--crl-series` | auto from cert | CRL series number |
-| `--save-crl` | — | Save raw downloaded CRL bytes to file |
-| `--load-crl` | — | Load CRL from file instead of downloading |
+| `--certs-dir` | required if `--bsm` not used | Pseudonym bundle root. With `--bsm`: only `trustedcerts/` is read; `download/` is ignored. Omit entirely when `--ctl` + `--ra-url` cover both needs. |
+| `--bsm` | — | `Ieee1609Dot2Data` COER file; signer must include an inline certificate (not a digest). |
+| `--ctl` | — | `MultiSignedCtlSpdu` file or directory (e.g. `ctl/20250813-production_ctl`). Required when `--bsm` is used without `--certs-dir`. If a directory is given the first `*ctl*.oer` file is used. |
+| `--ra-url` | auto from `trustedcerts/ra` | Override RA base URL. Required for cross-provider mode. |
+| `--api-key` | — | `x-virtual-api-key` header; not required for ISS public CRL endpoint. |
+| `--craca-hex` | auto from `trustedcerts/` or CTL | HashedId8 of CRACA cert (16 hex chars). |
+| `--crl-series` | auto from cert | CRL series number. |
+| `--save-crl` | — | Save raw downloaded CRL bytes to file. |
+| `--load-crl` | — | Load CRL from file instead of downloading (offline re-check). |
+
+#### CRACA resolution logic
+
+```
+cracaId3 (3 bytes, from pseudonym cert)
+    │
+    ├─ scan --certs-dir/trustedcerts/   ← same-provider (mode 1 & 2)
+    │       SHA-256(cert)[-3:] == cracaId3 → HashedId8
+    │
+    └─ scan --ctl unsigned certs        ← cross-provider fallback (mode 3)
+            MultiSignedCtl.unsigned (SequenceOfCertificate)
+            contains approved RCA certs for all SCMS providers
+            SHA-256(cert)[-3:] == cracaId3 → HashedId8
+```
 
 #### Observed output (ISS preprod, April 2026)
 
@@ -693,17 +731,19 @@ The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` 
 [4] Downloading CRL from https://ra.preprod.v2x.isscms.com ...
   GET https://ra.preprod.v2x.isscms.com/crl?craca=93232614ee5e6f5b&crlSeries=1 → 404
   GET https://ra.preprod.v2x.isscms.com/v3/crl?craca=93232614ee5e6f5b&crlSeries=1 → 200
-  Downloaded 132 bytes
+  Downloaded 165 bytes
 
 [5] Parsing CRL ...
   CRL type    : fullLinkedCrl
-  issueDate   : 2026-04-07 20:53 UTC  (1d ago)
-  nextCrl     : 2026-04-14 09:00 UTC  (in 6d)  (i-period rollover; CRL may be reissued earlier on revocation)
-  iRev        : 587
+  issueDate   : 2026-04-21 09:00 UTC  (1d ago)
+  nextCrl     : 2026-04-28 09:00 UTC  (in 5d)  (i-period rollover; CRL may be reissued earlier on revocation)
+  iRev        : 589
   indexWithinI: 0  (increments each time a new CRL is issued within this i-period)
   individual  : 1 JMaxGroup(s)
   groups      : 0 GroupCrlEntry(s)
   groupsSingle: 0 GroupSingleSeedEntry(s)
+    la1=0004  la2=0005  iMax=606  seeds=1
+      [  0] i=589  lv=8ceea55f495ac0f572
 
 [6] Checking revocation ...
   NOT REVOKED: 0 of 400 pseudonym certificates appear in the CRL
@@ -714,17 +754,15 @@ The RA URL is auto-discovered from `trustedcerts/ra`.  Override with `--ra-url` 
 | CRL field | Value | Meaning |
 |-----------|-------|---------|
 | `fullLinkedCrl` | — | Linkage-based full CRL (pseudonym certs) |
-| `iRev = 587` | — | CRL covers i-period 587; bundle spans 0x249–0x25C so this is within range |
+| `iRev = 589` | — | The revoked entity had i-period 589 |
 | `indexWithinI = 0` | — | First CRL issued for this (CRACA, crlSeries, iRev) combination; increments on each revocation-triggered re-issuance within the same i-period |
 | `nextCrl` | — | Scheduled i-period rollover — **not** the only update point; the MA reissues the CRL immediately on each revocation event, incrementing `indexWithinI` |
-| `individual: 1 JMaxGroup` | — | CRL skeleton present: LA group structure (`la1Id`, `la2Id`, `iMax`) returned, but `seeds=0` |
-| NOT REVOKED | — | ISS's public `/v3/crl` endpoint returns a **skeleton CRL** — the `IndividualRevocation` seed pairs are absent (see note below) |
+| `lv=8ceea55f...` | — | Linkage value computed from seeds at `iRev`; compared against each cert's `linkage-value` field |
+| NOT REVOKED | — | None of the 400 bundle certs (or the single BSM cert) matched the CRL entry |
 
-> **ISS skeleton CRL issue:** ISS's public `/v3/crl` endpoint returns the CRL grouping structure (`JMaxGroup → LAGroup → IMaxGroup`) with `la1Id`, `la2Id`, and `iMax` populated, but the `IndividualRevocation` seed pairs (`linkageSeed1`, `linkageSeed2`) are absent (`seeds=0`). Without the combined seeds, linkage value computation is impossible and no device can ever appear as REVOKED from this endpoint.
+> **ISS skeleton CRL issue:** ISS's public `/v3/crl` endpoint sometimes returns a **skeleton CRL** — the `IndividualRevocation` seed pairs (`linkageSeed1`, `linkageSeed2`) are absent (`seeds=0`). Without the combined seeds, linkage value computation is impossible and no device can ever appear as REVOKED from this endpoint.
 >
-> Per IEEE 1609.2.1-2022 §6.3.5.8/§6.3.5.10 (CRL download APIs), the RA is responsible for combining the two LA halves and distributing the complete CRL to all parties — including vehicles with no ISS credentials. IEEE 1609.2-2022 §7.3 defines the `IndividualRevocation` data structure as containing both `linkageSeed1` and `linkageSeed2`; if those fields are absent, the CRL is structurally valid per ASN.1 (`SIZE(0..MAX)`) but operationally useless for revocation checking. A vehicle receiving a BSM must be able to check the signer's linkage value against the CRL independently. ISS's current public endpoint does not satisfy this requirement.
->
-> `indexWithinI` incrementing confirms revocations have occurred; the seeds simply are not exposed via the unauthenticated endpoint. An authenticated endpoint or an alternative distribution channel (e.g. DSRC broadcast) may carry the complete CRL.
+> Per IEEE 1609.2.1-2022 §6.3.5.8/§6.3.5.10, the RA is responsible for combining the two LA halves and distributing the complete CRL. IEEE 1609.2-2022 §7.3 defines `IndividualRevocation` as containing both seed fields; a skeleton CRL is structurally valid per ASN.1 but operationally useless for revocation checking. An authenticated endpoint or DSRC broadcast channel may carry the complete CRL.
 
 #### End-to-end revocation verification procedure
 
@@ -741,7 +779,6 @@ To verify the full MBR → MA → CRL pipeline:
        --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
        --out-dir output/
    # Step 1b — wrap the faulty BSM as a signed+encrypted MBR
-   # (MA cert is auto-downloaded from the RA identified in the bundle)
    python3 create_mbr.py \
        --bsm coer/encoded_out_0 \
        --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e \
@@ -757,9 +794,14 @@ To verify the full MBR → MA → CRL pipeline:
 
 3. **Wait** for the MA to process the reports and issue a new CRL.  The MA reissues the CRL immediately on each revocation — it does not wait for the scheduled `nextCrl` rollover.  Poll by re-running step 4 and watching for `indexWithinI` to increment and `individual` count to increase.
 
-4. **Re-check the CRL**:
+4. **Re-check the CRL:**
    ```bash
+   # Check own bundle
+   python3 check_crl.py --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
+
+   # Or check the specific BSM that was reported
    python3 check_crl.py \
+       --bsm coer/bad_accel_iss_key.coer \
        --certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e
    ```
    When the MA revokes the device, the `individual` entry count increases and `NOT REVOKED` changes to `REVOKED`.
@@ -772,10 +814,11 @@ To verify the full MBR → MA → CRL pipeline:
 
 #### Notes
 
-- **Multi-SCMS**: The CRACA is the root CA of the bundle's PKI chain.  Certs from a different SCMS (different root CA) have a different `cracaId` and belong to a different CRL series — check each SCMS's RA separately.
+- **`--bsm` signer requirement**: The BSM's `signerIdentifier` must use the `certificate` choice (inline cert).  If it uses `digest` (HashedId8 only), the script exits with an error — the full certificate is needed to check revocation.
+- **CTL structure**: `MultiSignedCtl.unsigned` is a `SequenceOfCertificate` containing the actual cert objects for all entries in `electorApprove` and `rootCaApprove`.  It does **not** contain RA certs — the RA URL is not available from the CTL and must be supplied via `--ra-url` for cross-provider checks.
 - **Delta CRLs**: `deltaLinkedCrl` entries contain only revocations since the last full CRL.  The script handles both full and delta types.
-- **CRL update semantics**: `nextCrl` is a Time32 marking the scheduled i-period rollover (weekly for ISS), but the MA reissues the CRL immediately on every revocation event without waiting for that deadline.  Use `indexWithinI` (a Uint8 counter starting at 0) to detect mid-period reissuances: if `indexWithinI` has incremented since your last fetch, a new revocation has been published.
-- **`iRev` vs `iCert`**: `iRev` in the CRL is the i-period for which revocation takes effect; it must match `iCert` in the pseudonym cert for the derived linkage value to be correct.
+- **CRL update semantics**: `nextCrl` is a Time32 marking the scheduled i-period rollover (weekly for ISS), but the MA reissues the CRL immediately on every revocation event without waiting for that deadline.  Use `indexWithinI` (a Uint8 counter starting at 0) to detect mid-period reissuances.
+- **`iRev` vs `iCert`**: `iRev` in the CRL is the i-period for which revocation takes effect; it must equal `iCert` in the pseudonym cert for the derived linkage value to match.
 
 ### pycrate Schema Compatibility — `test_pycrate_schema.py`
 

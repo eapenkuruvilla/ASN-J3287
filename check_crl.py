@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-check_crl.py — Download the IEEE 1609.2 CRL from the ISS RA and check whether
-any pseudonym certificates are revoked.
+check_crl.py — Download the IEEE 1609.2 CRL from the SCMS RA and check whether
+pseudonym certificates are revoked.
 
-Usage:
-    python3 check_crl.py \
-        --ra-url https://ra.proprod.v2x.isscms.com \
-        --api-key <x-virtual-api-key>               \
-        [--certs-dir certs/ISS/pseudonym/9b09e9e5e5c99a9e]
-        [--craca-hex 93232614ee5e6f5b]              \
-        [--crl-series 1]                             \
-        [--save-crl crl.coer]
+Three modes:
+
+  Mode 1 — check own device bundle:
+    python3 check_crl.py --certs-dir certs/ISS/pseudonym/<id>
+
+  Mode 2 — check signing cert from a received BSM (same SCMS provider):
+    python3 check_crl.py --bsm <file.coer> --certs-dir certs/ISS/pseudonym/<id>
+
+  Mode 3 — check BSM from a different SCMS provider (cross-provider):
+    python3 check_crl.py --bsm <file.coer> \
+        --ctl ctl/20250813-production_ctl   \
+        --ra-url https://ra.otherprovider.com
 
 Standards reference:
-  IEEE 1609.2-2022    §7.3  CRL data structures
+  IEEE 1609.2-2022    §7.3        CRL data structures
   IEEE 1609.2.1-2022  §6.3.5.10  Individual CRL download API
                       §6.3.5.8   Composite CRL download API
+                      §7.3.11    MultiSignedCtl / CTL structure
 """
 
 import argparse
@@ -151,6 +156,36 @@ def parse_cert(cert_bytes: bytes) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# BSM certificate extraction
+# ---------------------------------------------------------------------------
+
+def extract_cert_from_bsm(bsm_bytes: bytes) -> bytes:
+    """
+    Extract the leaf signing certificate from an Ieee1609Dot2Data { signedData } BSM.
+    Returns raw COER bytes of the Certificate (leaf / pseudonym cert).
+    Raises ValueError if the signer uses a digest (no inline cert) or the
+    structure is not signedData.
+    """
+    from asn1c_lib import decode_oer as _decode, encode_jer as _encode
+    try:
+        bsm = _decode("Ieee1609Dot2Data", bsm_bytes)
+        signer = bsm["content"]["signedData"]["signer"]
+    except Exception as e:
+        raise ValueError(f"Cannot parse BSM as Ieee1609Dot2Data {{signedData}}: {e}")
+
+    if "digest" in signer:
+        raise ValueError(
+            "BSM signer is a digest (HashedId8 only) — no inline certificate present.\n"
+            "  Revocation check requires an inline certificate in the BSM."
+        )
+    certs = signer.get("certificate")
+    if not certs:
+        raise ValueError(f"Unexpected signer structure (keys: {list(signer)})")
+
+    return _encode("Certificate", certs[0])
+
+
+# ---------------------------------------------------------------------------
 # CRACA identification
 # ---------------------------------------------------------------------------
 
@@ -163,28 +198,29 @@ def ra_url_from_cert(certs_dir: str) -> str | None:
     return ra_url_from_bundle(certs_dir)
 
 
-def find_craca(certs_dir: str) -> tuple[str, bytes] | tuple[None, None]:
+def find_craca(certs_dir: str, cert_bytes: bytes = None) -> tuple[str, bytes] | tuple[None, None]:
     """
     Search trustedcerts/ for the certificate whose SHA-256[-3:] matches the
-    cracaId (HashedId3) of the first pseudonym certificate found.
+    cracaId (HashedId3) of cert_bytes, or of the first pseudonym certificate
+    found in download/ if cert_bytes is not provided.
     Returns (craca_hashed_id8_hex, craca_cert_bytes).
     """
-    # Find first pseudonym cert
-    download_dir = os.path.join(certs_dir, "download")
-    first_cert_bytes = None
-    for week in sorted(os.listdir(download_dir)):
-        week_dir = os.path.join(download_dir, week)
-        for f in sorted(os.listdir(week_dir)):
-            if f.endswith(".cert"):
-                first_cert_bytes = open(os.path.join(week_dir, f), "rb").read()
+    if cert_bytes is None:
+        # Find first pseudonym cert from download/
+        download_dir = os.path.join(certs_dir, "download")
+        for week in sorted(os.listdir(download_dir)):
+            week_dir = os.path.join(download_dir, week)
+            for f in sorted(os.listdir(week_dir)):
+                if f.endswith(".cert"):
+                    cert_bytes = open(os.path.join(week_dir, f), "rb").read()
+                    break
+            if cert_bytes:
                 break
-        if first_cert_bytes:
-            break
-    if not first_cert_bytes:
-        print("  No pseudonym cert found.")
-        return None, None
+        if not cert_bytes:
+            print("  No pseudonym cert found.")
+            return None, None
 
-    parsed = parse_cert(first_cert_bytes)
+    parsed = parse_cert(cert_bytes)
     if parsed is None:
         print("  pycrate unavailable — cannot parse cert to find cracaId.")
         return None, None
@@ -204,6 +240,127 @@ def find_craca(certs_dir: str) -> tuple[str, bytes] | tuple[None, None]:
             return hid8.hex(), data
 
     print(f"  WARNING: No trustedcert matched cracaId {craca_id3.hex()}")
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# CTL-based CRACA lookup
+# ---------------------------------------------------------------------------
+
+def _ctl_unsigned_cert_bytes(ctl_file_bytes: bytes) -> list[bytes]:
+    """
+    Parse a MultiSignedCtlSpdu (Ieee1609Dot2Data) and return the raw COER bytes
+    of every Certificate in MultiSignedCtl.unsigned (SequenceOfCertificate).
+    Returns an empty list on any parse failure.
+    """
+    mod = _get_pycrate_mod()
+    if mod is None:
+        return []
+    try:
+        # Outer Ieee1609Dot2Data
+        D = mod.Ieee1609Dot2.Ieee1609Dot2Data
+        D.from_oer(ctl_file_bytes)
+        v = D.get_val()
+
+        # Navigate to unsecuredData (same pattern as extract_crl_contents)
+        content = v["content"]
+        sd = content[1] if isinstance(content, (list, tuple)) else content.get("signedData")
+        if isinstance(sd, (list, tuple)):
+            sd = sd[1]
+        inner = sd["tbsData"]["payload"]["data"]["content"]
+        if isinstance(inner, (list, tuple)):
+            _, unsecured = inner
+        else:
+            unsecured = inner.get("unsecuredData")
+
+        if not isinstance(unsecured, (bytes, bytearray)):
+            return []
+
+        # CertManagementPdu → multiSignedCtl → MultiSignedCtl
+        CMP = mod.Ieee1609Dot2Dot1CertManagement.CertManagementPdu
+        CMP.from_oer(bytes(unsecured))
+        cmp_val = CMP.get_val()
+
+        if isinstance(cmp_val, (list, tuple)):
+            cmp_choice, msc_val = cmp_val
+        else:
+            cmp_choice = next(iter(cmp_val))
+            msc_val = cmp_val[cmp_choice]
+
+        if cmp_choice != "multiSignedCtl":
+            return []
+
+        unsigned = msc_val.get("unsigned")
+        if unsigned is None:
+            return []
+
+        # unsigned is SequenceOfCertificate — open type, likely arrives as raw bytes
+        if isinstance(unsigned, (bytes, bytearray)):
+            SeqCert = mod.Ieee1609Dot2.SequenceOfCertificate
+            SeqCert.from_oer(bytes(unsigned))
+            cert_vals = SeqCert.get_val()
+        elif isinstance(unsigned, list):
+            cert_vals = unsigned
+        else:
+            return []
+
+        # Re-encode each cert value to raw COER bytes for hashing
+        C = mod.Ieee1609Dot2.Certificate
+        result = []
+        for cv in (cert_vals or []):
+            try:
+                C.set_val(cv)
+                result.append(bytes(C.to_oer()))
+            except Exception:
+                continue
+        return result
+
+    except Exception as e:
+        print(f"  [ctl] Parse error: {e}")
+        return []
+
+
+def find_craca_in_ctl(ctl_path: str, craca_id3: bytes) -> tuple[str, bytes] | tuple[None, None]:
+    """
+    Scan the unsigned certificates in a MultiSignedCtlSpdu for a cert whose
+    SHA-256[-3:] matches craca_id3.
+    ctl_path may be a file or a directory; if a directory, the first
+    *ctl*.oer file found is used.
+    Returns (craca_hashed_id8_hex, craca_cert_bytes) or (None, None).
+    """
+    if os.path.isdir(ctl_path):
+        oer_files = sorted(
+            f for f in os.listdir(ctl_path)
+            if f.endswith(".oer") and "ctl" in f.lower()
+        )
+        if not oer_files:
+            oer_files = sorted(f for f in os.listdir(ctl_path) if f.endswith(".oer"))
+        if not oer_files:
+            print(f"  [ctl] No .oer file found in {ctl_path}")
+            return None, None
+        ctl_path = os.path.join(ctl_path, oer_files[0])
+
+    print(f"  CTL file: {ctl_path}")
+    try:
+        ctl_bytes = open(ctl_path, "rb").read()
+    except OSError as e:
+        print(f"  [ctl] {e}")
+        return None, None
+
+    cert_bytes_list = _ctl_unsigned_cert_bytes(ctl_bytes)
+    if not cert_bytes_list:
+        print(f"  [ctl] No certificates extracted from CTL")
+        return None, None
+
+    print(f"  {len(cert_bytes_list)} unsigned certificate(s) in CTL")
+    for cb in cert_bytes_list:
+        digest = hashlib.sha256(cb).digest()
+        if digest[-3:] == craca_id3:
+            hid8 = digest[-8:].hex()
+            print(f"  CRACA found in CTL  HashedId8={hid8}")
+            return hid8, cb
+
+    print(f"  [ctl] No cert matched cracaId {craca_id3.hex()}")
     return None, None
 
 
@@ -481,8 +638,16 @@ def main():
                     help="RA base URL. Auto-discovered from trustedcerts/ra cert if omitted "
                          "(IEEE 1609.2.1 §7.6.3.10).")
     ap.add_argument("--api-key", default=None, help="x-virtual-api-key header value")
-    ap.add_argument("--certs-dir", required=True,
-                    help="Pseudonym bundle directory (must contain download/ and trustedcerts/)")
+    ap.add_argument("--certs-dir", default=None,
+                    help="Pseudonym bundle directory. Required when --bsm is not used "
+                         "(download/ contains the certs to check). When used with --bsm, "
+                         "only trustedcerts/ is needed for RA URL and cracaId discovery; "
+                         "omit entirely when --ctl + --ra-url cover both.")
+    ap.add_argument("--bsm", default=None,
+                    help="Check the signing certificate from this BSM file "
+                         "(Ieee1609Dot2Data COER). The signer must use an inline "
+                         "certificate (not a digest). Use with --certs-dir, or with "
+                         "--ctl + --ra-url for cross-provider checking.")
     ap.add_argument("--craca-hex", default=None,
                     help="HashedId8 of CRACA cert (16 hex chars). "
                          "Auto-detected from trustedcerts/ if omitted.")
@@ -492,7 +657,19 @@ def main():
                     help="Save downloaded CRL bytes to this file.")
     ap.add_argument("--load-crl", default=None,
                     help="Load CRL from file instead of downloading (for offline use).")
+    ap.add_argument("--ctl", default=None,
+                    help="Path to a MultiSignedCtlSpdu file or directory (e.g. "
+                         "ctl/20250813-production_ctl). Used as a fallback when "
+                         "the CRACA cert is not found in --certs-dir/trustedcerts/ "
+                         "(e.g. BSM from a different SCMS provider). "
+                         "If a directory is given, the first *ctl*.oer file is used.")
     args = ap.parse_args()
+
+    if not args.bsm and not args.certs_dir:
+        ap.error("--certs-dir is required when --bsm is not used.")
+    if args.bsm and not args.certs_dir and not args.ctl:
+        ap.error("--bsm without --certs-dir requires --ctl for cracaId resolution "
+                 "(and --ra-url for the CRL download endpoint).")
 
     SEP = "─" * 70
     print(SEP)
@@ -507,27 +684,55 @@ def main():
     else:
         print("  OK")
 
-    # ---- Step 2: parse certs ----
-    print(f"\n[2] Parsing pseudonym certs in {args.certs_dir}/download/ ...")
-    certs = collect_certs(args.certs_dir)
-    print(f"  Found {len(certs)} certificate(s)")
-    if certs:
-        sample = certs[0]
-        print(f"  Sample: {sample['path']}")
-        print(f"    type       : {sample.get('type', 'unknown')}")
-        print(f"    i_cert     : {sample.get('i_cert', 'n/a')}  (0x{sample.get('i_cert',0):x})")
-        print(f"    linkage_val: {sample.get('linkage_value', b'').hex()}")
-        print(f"    hid10      : {sample.get('hid10', 'n/a')}")
+    # ---- Step 2: load cert(s) to check ----
+    bsm_cert_bytes = None  # set when --bsm is used; drives find_craca and crlSeries
+
+    if args.bsm:
+        print(f"\n[2] Extracting signing cert from BSM {args.bsm} ...")
+        try:
+            bsm_raw = open(args.bsm, "rb").read()
+            bsm_cert_bytes = extract_cert_from_bsm(bsm_raw)
+        except (OSError, ValueError) as e:
+            print(f"  ERROR: {e}")
+            sys.exit(1)
+        parsed = parse_cert(bsm_cert_bytes)
+        if parsed is None:
+            print("  ERROR: pycrate unavailable — cannot parse extracted certificate.")
+            sys.exit(1)
+        parsed["path"] = args.bsm
+        parsed["raw"]  = bsm_cert_bytes
+        parsed["hid10"] = hashed_id10(bsm_cert_bytes).hex()
+        certs = [parsed]
+        print(f"  type       : {parsed.get('type', 'unknown')}")
+        print(f"  i_cert     : {parsed.get('i_cert', 'n/a')}  (0x{parsed.get('i_cert', 0):x})")
+        print(f"  linkage_val: {parsed.get('linkage_value', b'').hex()}")
+        print(f"  hid10      : {parsed.get('hid10', 'n/a')}")
+    else:
+        print(f"\n[2] Parsing pseudonym certs in {args.certs_dir}/download/ ...")
+        certs = collect_certs(args.certs_dir)
+        print(f"  Found {len(certs)} certificate(s)")
+        if certs:
+            sample = certs[0]
+            print(f"  Sample: {sample['path']}")
+            print(f"    type       : {sample.get('type', 'unknown')}")
+            print(f"    i_cert     : {sample.get('i_cert', 'n/a')}  (0x{sample.get('i_cert',0):x})")
+            print(f"    linkage_val: {sample.get('linkage_value', b'').hex()}")
+            print(f"    hid10      : {sample.get('hid10', 'n/a')}")
 
     # ---- Step 2b: auto-discover RA URL from trustedcerts/ra ----
     ra_url = args.ra_url
     if ra_url is None:
-        print(f"\n[2b] Auto-discovering RA URL from {args.certs_dir} ...")
-        ra_url = ra_url_from_cert(args.certs_dir)
-        if ra_url:
-            print(f"  RA URL from certificate: {ra_url}")
+        if args.certs_dir:
+            print(f"\n[2b] Auto-discovering RA URL from {args.certs_dir} ...")
+            ra_url = ra_url_from_cert(args.certs_dir)
+            if ra_url:
+                print(f"  RA URL from certificate: {ra_url}")
+            else:
+                print("  Could not read RA cert. Supply --ra-url explicitly.")
+                sys.exit(1)
         else:
-            print("  Could not read RA cert. Supply --ra-url explicitly.")
+            print("  ERROR: no --ra-url supplied and no --certs-dir to discover it from.")
+            print("  Supply --ra-url <RA base URL> for the provider that issued the BSM.")
             sys.exit(1)
 
     # ---- Step 3: determine cracaId / crlSeries ----
@@ -535,10 +740,23 @@ def main():
     crl_series = args.crl_series
 
     if craca_hex is None or crl_series is None:
-        print(f"\n[3] Identifying CRACA from {args.certs_dir}/trustedcerts/ ...")
-        auto_craca_hex, _ = find_craca(args.certs_dir)
-        if craca_hex is None:
-            craca_hex = auto_craca_hex
+        if args.certs_dir:
+            print(f"\n[3] Identifying CRACA from {args.certs_dir}/trustedcerts/ ...")
+            auto_craca_hex, _ = find_craca(args.certs_dir, bsm_cert_bytes)
+            if craca_hex is None:
+                craca_hex = auto_craca_hex
+
+        if craca_hex is None and args.ctl and certs:
+            craca_id3 = certs[0].get("craca_id3", b"")
+            if craca_id3:
+                label = "[3b]" if args.certs_dir else "[3] "
+                print(f"\n{label} Searching CTL for cracaId {craca_id3.hex()} ...")
+                craca_hex, _ = find_craca_in_ctl(args.ctl, craca_id3)
+                if craca_hex and args.ra_url is None:
+                    print(f"  NOTE: CRACA resolved via CTL (cross-provider). "
+                          f"RA URL is from your own trustedcerts/ — if the CRL "
+                          f"download fails, supply --ra-url for the other provider's RA.")
+
         if crl_series is None and certs:
             crl_series = certs[0].get("crl_series", 1)
             print(f"  crlSeries from cert: {crl_series}")
@@ -669,13 +887,14 @@ def main():
                       "fullLinkedCrlWithAlg", "deltaLinkedCrlWithAlg"):
         revoked = check_linkage_based(crl_contents, certs)
 
+    noun = "certificate" if len(certs) == 1 else "pseudonym certificates"
     print(SEP)
     if revoked:
-        print(f"  REVOKED: {len(revoked)} certificate(s) found in CRL")
+        print(f"  REVOKED: {len(revoked)} {noun} found in CRL")
         for r in revoked:
             print(f"    {r['path']}  reason={r['reason']}  i_cert={r.get('i_cert','?')}")
     else:
-        print(f"  NOT REVOKED: 0 of {len(certs)} pseudonym certificates appear in the CRL")
+        print(f"  NOT REVOKED: 0 of {len(certs)} {noun} appear in the CRL")
     print(SEP)
 
 
