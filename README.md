@@ -646,13 +646,25 @@ Used to verify that the MA has acted on submitted MBRs by revoking the misbehavi
 
 #### Background
 
-Pseudonym certificates in the ISS SCMS use **linkage-based revocation** (IEEE 1609.2 §7.3.7).  The CRL does not list certificate hashes; instead it publishes cryptographic seeds (`linkageSeed1`, `linkageSeed2`) from which the linkage value for each revoked device at a given i-period can be derived:
+Pseudonym certificates in the ISS SCMS use **linkage-based revocation** (IEEE 1609.2-2022 §5.1.3.4).  The CRL does not list certificate hashes; instead it publishes cryptographic seeds (`linkageSeed1`, `linkageSeed2`) from which the linkage value for each revoked device at a given i-period can be derived.
+
+The algorithm (§5.1.3.4.2, §5.1.3.4.6, §5.1.3.4.8) has three stages:
 
 ```
-linkage_value = AES-128-ECB(key=seed1, data=i_padded_16_bytes)
-              ⊕ AES-128-ECB(key=seed2, data=i_padded_16_bytes)
-              [first 9 bytes]
+1. Seed evolution (seedEvoFn1-sha256, §5.1.3.4.6):
+   While iRev < iCert:
+     seed = low-order 16 bytes of SHA-256(la_id || seed || 0^112)
+     iRev++
+
+2. Pre-linkage value (lvGenFn1-aes128, §5.1.3.4.8):
+   data = 0^80 || la_id || Uint32(j)          (16 bytes)
+   PLV  = AES-128-ECB(key=seed, data) ⊕ data   (Davies-Meyer)
+
+3. Linkage value:
+   LV = low-order 9 bytes of (PLV1 ⊕ PLV2)
 ```
+
+For each CRL entry the script iterates j = 0 … jMax−1 and checks every cert with iCert ≥ iRev.  `la_id` (2-byte `LaId`) comes from the CRL's `LAGroup` structure; `j` is the certificate index within the i-period.  Test vectors are in IEEE 1609.2-2022 Annex D.7.
 
 The derived value is compared against the `toBeSigned.id.linkageData.linkage-value` field (9 bytes) embedded in each pseudonym certificate.  See [Pseudonym Certificate — COER Structure](#pseudonym-certificate--coer-structure-ieee-16092-certificatebase) for a full field-by-field breakdown.
 
@@ -697,7 +709,16 @@ python3 check_crl.py \
 ```
 No `--certs-dir` required.  The CRACA is resolved by scanning the CTL's unsigned certificates (`MultiSignedCtl.unsigned`, a `SequenceOfCertificate` containing all approved RCA certs) for the one matching the BSM cert's `cracaId3`.  The RA URL must be supplied explicitly — it is not in the CTL (which contains only RCA and elector certs, not RA certs).
 
-> **Note on cross-provider RA URL:** Before reaching out to the other provider's RA directly, it is worth trying your own RA's composite CRL endpoint — `check_crl.py` already falls back to `/composite-crl` if the individual CRL endpoint returns 404.  IEEE 1609.2.1 §6.3.5.8 defines composite CRLs as an optional aggregation mechanism; support varies by provider.
+> **Composite CRL — the preferred approach for production devices:**
+> In a multi-provider ecosystem each RCA has its own CRL signer, creating many independent CRLs a device would need to track.  IEEE 1609.2.1-2022 §4.1.6 solves this with the **Composite CRL**: the device's own RA aggregates CRLs from all SCMS providers into a single `CompositeCrlSpdu` (§6.3.5.8):
+>
+> ```
+> GET composite-crl-ctl?ctlSeriesId={hex}   →  CompositeCrl { crl: [SecuredCrl, …], homeCtl }
+> ```
+>
+> The `crl` field is a `SEQUENCE OF SecuredCrl` covering every (CRACA, crlSeries) pair the RA considers relevant — the device downloads once from its own RA and gets all CRLs.  This is the **preferred** mechanism per §4.1.6.2; the per-CRACA individual CRL endpoint (`/v3/crl?craca=...&crlSeries=...`) is the fallback.
+>
+> **Note on cross-provider RA URL:** `check_crl.py` currently uses the individual CRL endpoint.  For cross-provider mode the RA URL must be supplied explicitly (`--ra-url`); it is not in the CTL (which contains only RCA and elector certs, not RA certs).  Support for parsing `CompositeCrlSpdu` is planned.
 
 | Argument | Default | Notes |
 |----------|---------|-------|
@@ -731,22 +752,24 @@ cracaId3 (3 bytes, from pseudonym cert)
 [4] Downloading CRL from https://ra.preprod.v2x.isscms.com ...
   GET https://ra.preprod.v2x.isscms.com/crl?craca=93232614ee5e6f5b&crlSeries=1 → 404
   GET https://ra.preprod.v2x.isscms.com/v3/crl?craca=93232614ee5e6f5b&crlSeries=1 → 200
-  Downloaded 165 bytes
+  Downloaded 203 bytes
 
 [5] Parsing CRL ...
   CRL type    : fullLinkedCrl
-  issueDate   : 2026-04-21 09:00 UTC  (1d ago)
-  nextCrl     : 2026-04-28 09:00 UTC  (in 5d)  (i-period rollover; CRL may be reissued earlier on revocation)
+  issueDate   : 2026-04-23 20:33 UTC  (53m ago)
+  nextCrl     : 2026-04-28 09:00 UTC  (in 4d)  (i-period rollover; CRL may be reissued earlier on revocation)
   iRev        : 589
   indexWithinI: 0  (increments each time a new CRL is issued within this i-period)
   individual  : 1 JMaxGroup(s)
   groups      : 0 GroupCrlEntry(s)
   groupsSingle: 0 GroupSingleSeedEntry(s)
-    la1=0004  la2=0005  iMax=606  seeds=1
-      [  0] i=589  lv=8ceea55f495ac0f572
+    la1=0004  la2=0005  iMax=606  jMax=20  seeds=1
+      [  0] i=589 j=0 lv=92642a75990375699d
+    la1=0004  la2=0005  iMax=608  jMax=20  seeds=1
+      [  1] i=589 j=0 lv=d30e993f8a5c2f3931
 
 [6] Checking revocation ...
-  NOT REVOKED: 0 of 400 pseudonym certificates appear in the CRL
+  NOT REVOKED: 0 of 1 certificate appear in the CRL
 ```
 
 **Interpretation:**
@@ -754,11 +777,12 @@ cracaId3 (3 bytes, from pseudonym cert)
 | CRL field | Value | Meaning |
 |-----------|-------|---------|
 | `fullLinkedCrl` | — | Linkage-based full CRL (pseudonym certs) |
-| `iRev = 589` | — | The revoked entity had i-period 589 |
+| `iRev = 589` | — | Seeds are at i-period 589; evolved forward via SHA-256 hash chain when checking certs with iCert > iRev |
 | `indexWithinI = 0` | — | First CRL issued for this (CRACA, crlSeries, iRev) combination; increments on each revocation-triggered re-issuance within the same i-period |
 | `nextCrl` | — | Scheduled i-period rollover — **not** the only update point; the MA reissues the CRL immediately on each revocation event, incrementing `indexWithinI` |
-| `lv=8ceea55f...` | — | Linkage value computed from seeds at `iRev`; compared against each cert's `linkage-value` field |
-| NOT REVOKED | — | None of the 400 bundle certs (or the single BSM cert) matched the CRL entry |
+| `jMax = 20` | — | Number of certificates per i-period; j = 0…19 are all checked |
+| `lv=92642a75...` | — | Linkage value at (iRev, j=0) computed via Davies-Meyer AES-128 ⊕ XOR (§5.1.3.4.8); all j values are checked during revocation |
+| NOT REVOKED | — | None of the bundle certs (or the single BSM cert) matched any CRL entry at any j value |
 
 > **ISS skeleton CRL issue:** ISS's public `/v3/crl` endpoint sometimes returns a **skeleton CRL** — the `IndividualRevocation` seed pairs (`linkageSeed1`, `linkageSeed2`) are absent (`seeds=0`). Without the combined seeds, linkage value computation is impossible and no device can ever appear as REVOKED from this endpoint.
 >
@@ -806,11 +830,13 @@ To verify the full MBR → MA → CRL pipeline:
    ```
    When the MA revokes the device, the `individual` entry count increases and `NOT REVOKED` changes to `REVOKED`.
 
-5. **Confirm linkage value match** — the script computes:
+5. **Confirm linkage value match** — for each CRL seed pair the script evolves seeds from iRev to iCert (§5.1.3.4.6), then for j = 0…jMax−1 computes:
    ```
-   lv = AES-ECB(seed1, iRev) ⊕ AES-ECB(seed2, iRev)
+   data = 0^80 || la_id || Uint32(j)
+   PLV  = AES-128(key=evolved_seed, data) ⊕ data    (Davies-Meyer)
+   LV   = low-order 9 bytes of (PLV1 ⊕ PLV2)
    ```
-   and compares against every cert's `linkage-value` field.  A match confirms the MA used the correct linkage data.
+   and compares against every cert's `linkage-value` field.  A match confirms the MA used the correct linkage data.  Algorithm verified against IEEE 1609.2-2022 Annex D.7 test vectors.
 
 #### Notes
 
@@ -818,7 +844,7 @@ To verify the full MBR → MA → CRL pipeline:
 - **CTL structure**: `MultiSignedCtl.unsigned` is a `SequenceOfCertificate` containing the actual cert objects for all entries in `electorApprove` and `rootCaApprove`.  It does **not** contain RA certs — the RA URL is not available from the CTL and must be supplied via `--ra-url` for cross-provider checks.
 - **Delta CRLs**: `deltaLinkedCrl` entries contain only revocations since the last full CRL.  The script handles both full and delta types.
 - **CRL update semantics**: `nextCrl` is a Time32 marking the scheduled i-period rollover (weekly for ISS), but the MA reissues the CRL immediately on every revocation event without waiting for that deadline.  Use `indexWithinI` (a Uint8 counter starting at 0) to detect mid-period reissuances.
-- **`iRev` vs `iCert`**: `iRev` in the CRL is the i-period for which revocation takes effect; it must equal `iCert` in the pseudonym cert for the derived linkage value to match.
+- **`iRev` vs `iCert`**: `iRev` in the CRL is the i-period at which the seeds are published.  When a cert's `iCert > iRev`, the script forward-evolves the seeds via the SHA-256 hash chain (§5.1.3.4.6) before computing the linkage value.  Certs with `iCert < iRev` cannot be checked (one-way chain) but would typically have expired.
 
 ### pycrate Schema Compatibility — `test_pycrate_schema.py`
 
