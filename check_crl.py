@@ -469,7 +469,7 @@ def _parse_crl_contents_bytes(data: bytes) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Linkage value computation (IEEE 1609.2 Annex B)
+# Linkage value computation (IEEE 1609.2-2022 §5.1.3.4)
 # ---------------------------------------------------------------------------
 
 def _aes_ecb(key: bytes, plaintext: bytes) -> bytes:
@@ -613,13 +613,21 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
                             if c.get("i_cert", 0) >= i_rev})
 
     def _check_individual(seed1_bytes, seed2_bytes, la1_id, la2_id,
-                          i_rev_val, jmax_val):
-        """Try every cert i_cert (>= iRev) × j (0…jMax-1) combination."""
+                          i_rev_val, jmax_val, imax_val):
+        """Try every cert i_cert (>= iRev, <= iMax) × j (0…jMax-1)."""
         for ic in i_cert_values:
+            # §5.1.3.4.2 step (a): skip if iCert > iMax
+            if ic > imax_val:
+                continue
+            # Evolve seeds once per i_cert, reuse for all j values
+            steps = ic - i_rev_val
+            s1 = _evolve_seed(seed1_bytes, la1_id, steps)
+            s2 = _evolve_seed(seed2_bytes, la2_id, steps)
             for j in range(jmax_val):
-                computed = compute_linkage_value(seed1_bytes, seed2_bytes,
-                                                la1_id, la2_id,
-                                                i_rev_val, ic, j)
+                plv1 = _plv(s1, la1_id, j)
+                plv2 = _plv(s2, la2_id, j)
+                xored = bytes(a ^ b for a, b in zip(plv1, plv2))
+                computed = xored[-9:]
                 key = (ic, computed.hex())
                 if key in cert_lv_map:
                     return cert_lv_map[key]
@@ -658,7 +666,7 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
                     s2 = _bytes_of(ir.get("linkageSeed2", b""))
                     if len(s1) == 16 and len(s2) == 16:
                         hit = _check_individual(s1, s2, la1_id, la2_id,
-                                               i_rev, jmax)
+                                               i_rev, jmax, imax)
                         if hit:
                             revoked.append({**hit, "reason": "linkage-individual",
                                             "i_rev": i_rev, "j_idx": j_idx})
@@ -676,7 +684,7 @@ def check_linkage_based(crl_contents: dict, certs: list[dict]) -> list[dict]:
         if len(s1) == 16 and len(s2) == 16:
             # Group revocation: no jMax in GroupCrlEntry; use j=0 only.
             # (Full group-linkage checking against GroupLinkageValue is TODO.)
-            hit = _check_individual(s1, s2, la1_id, la2_id, i_rev, 1)
+            hit = _check_individual(s1, s2, la1_id, la2_id, i_rev, 1, imax)
             if hit:
                 revoked.append({**hit, "reason": "linkage-group", "i_rev": i_rev})
 

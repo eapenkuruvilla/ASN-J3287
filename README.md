@@ -639,7 +639,7 @@ python3 decode_mbr.py coer/out_signed.coer
 Downloads the IEEE 1609.2 Certificate Revocation List from the SCMS RA and checks whether pseudonym certificates are revoked.  Supports three modes:
 
 - **Bundle mode** (`--certs-dir`): checks all 400 pseudonym certificates in a local device bundle.
-- **BSM mode** (`--bsm`): extracts the signing certificate directly from a received BSM and checks only that one certificate — no local bundle needed.
+- **BSM mode** (`--bsm --certs-dir`): extracts the signing certificate directly from a received BSM and checks only that certificate.  `--certs-dir` provides `trustedcerts/` for RA URL and CRACA resolution; `download/` is not scanned.
 - **Cross-provider mode** (`--bsm --ctl`): as above, but resolves the CRACA from a downloaded Certificate Trust List (CTL) when the BSM was signed by a device from a different SCMS provider.
 
 Used to verify that the MA has acted on submitted MBRs by revoking the misbehaving device's pseudonym certificates.
